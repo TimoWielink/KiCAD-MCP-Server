@@ -458,9 +458,17 @@ class KiCADInterface:
                 # Update board reference if command was successful
                 if result.get("success", False):
                     if command == "create_project" or command == "open_project":
-                        logger.info("Updating board reference...")
+                        logger.info(f"Project command '{command}' succeeded. Updating board reference...")
+                        logger.info(f"project_commands.board is None: {self.project_commands.board is None}")
                         # Get board from the project commands handler
                         self.board = self.project_commands.board
+                        if self.board is None:
+                            logger.error(
+                                f"WARNING: project_commands.board is None after successful {command}! "
+                                "This means pcbnew.LoadBoard() may have returned None silently."
+                            )
+                        else:
+                            logger.info(f"Board reference obtained: {self.board.GetFileName()}")
                         self._update_command_handlers()
 
                 return result
@@ -484,13 +492,23 @@ class KiCADInterface:
 
     def _update_command_handlers(self):
         """Update board reference in all command handlers"""
-        logger.debug("Updating board reference in command handlers")
+        logger.info(f"Updating board reference in command handlers. Board is None: {self.board is None}")
+        if self.board is not None:
+            try:
+                logger.info(f"Board filename: {self.board.GetFileName()}")
+            except Exception as e:
+                logger.error(f"Board object exists but GetFileName() failed: {e}")
+
         self.project_commands.board = self.board
+        # BoardCommands.board setter auto-propagates to nested
+        # sub-commands (size, layer, outline, view)
         self.board_commands.board = self.board
         self.component_commands.board = self.board
         self.routing_commands.board = self.board
         self.design_rule_commands.board = self.board
         self.export_commands.board = self.board
+
+        logger.info(f"Board reference update complete. board_commands.board is None: {self.board_commands.board is None}")
         
     # Schematic command handlers
     def _handle_create_schematic(self, params):
