@@ -2,6 +2,309 @@
 
 All notable changes to the KiCAD MCP Server project are documented here.
 
+## [2.2.3] - 2026-03-11
+
+### Merged: PR #57 (Kletternaut/demo/rpiCSI-videotest → main)
+
+This release incorporates 28 commits developed and live-tested during a full
+Raspberry Pi CSI adapter PCB design session. All tools listed below were validated
+end-to-end using Claude Desktop + KiCAD 9 on Windows.
+
+### New MCP Tools
+
+- `connect_passthrough` — Schematic-only tool that wires all pins of one connector
+  directly to the matching pins of another (e.g. J1 pin N → J2 pin N). Creates nets
+  named with a configurable prefix (`netPrefix`). Designed for FFC/ribbon cable
+  passthrough adapters. **Schematic only — do not call for PCB routing.**
+
+- `sync_schematic_to_board` — Imports all net/pad assignments from the schematic
+  into the open PCB file. Required after `connect_passthrough` before routing can
+  start. Returns `pads_assigned` count for verification.
+
+- `snapshot_project` — Saves a named checkpoint of the entire project folder into a
+  `snapshots/` subdirectory inside the project. Allows resuming from a known-good
+  state without redoing earlier steps. Accepts `step`, `label`, and optional `prompt`
+  parameters.
+
+- `run_erc` — Runs KiCAD's Electrical Rules Check on the schematic and returns
+  violations as structured JSON.
+
+- `import_svg_logo` — Converts an SVG file to PCB silkscreen polygons and places
+  them on a specified layer.
+
+### Bug Fixes
+
+- `route_pad_to_pad`: **Critical fix for B.Cu footprints in KiCAD 9.** `pad.GetLayerName()`
+  always returned `F.Cu` for SMD pads on flipped footprints (KiCAD 9 SWIG bug).
+  Fix: use `footprint.GetLayer()` instead, which correctly reflects the placed layer
+  after `Flip()`. Without this fix, no vias were inserted for back-to-back connectors.
+
+- `route_pad_to_pad`: Via was placed at the geometric midpoint between the two pads.
+  For back-to-back mirrored connectors (J1 F.Cu / J2 B.Cu) this caused all 15 vias
+  to stack at the same X coordinate (board center). Fix: via is now placed at the
+  X coordinate of the start pad (`via_x = start_pos.x`), producing 15 parallel
+  vertical traces.
+
+- `place_component` (B.Cu footprints): `Flip()` was called before `board.Add()`,
+  causing KiCAD 9 to hang for ~30 seconds. Fix: `board.Add()` first, then `Flip()`.
+
+- `add_board_outline`: Three separate bugs fixed — incorrect cornerRadius fallback,
+  wrong top-left origin default, and broken arc delegation for IPC rounded rectangles.
+
+- `snapshot_project`: Snapshots were saved one level above the project directory,
+  cluttering the parent folder. Fix: snapshots now go into `<project>/snapshots/`.
+
+- MCP server log timestamp was always UTC/ISO. Fix: now uses local system time.
+
+- `search_tools` (router pattern): direct tools like `snapshot_project` were invisible
+  to the router. Fix: direct tool names added to the router's known-tool list.
+
+### Developer Mode (`KICAD_MCP_DEV=1`)
+
+Set the environment variable `KICAD_MCP_DEV=1` in your Claude Desktop config to
+enable developer features:
+
+```json
+"env": {
+  "KICAD_MCP_DEV": "1"
+}
+```
+
+**What it does:**
+- `export_gerber` automatically copies the current MCP session log into the project's
+  `logs/` subdirectory as `mcp_log_<timestamp>.txt`.
+- `snapshot_project` copies the MCP session log into `logs/` at every checkpoint as
+  `mcp_log_step<N>_<timestamp>.txt`.
+- If a `prompt` parameter is passed to `snapshot_project`, it is saved as
+  `PROMPT_step<N>_<timestamp>.md` alongside the log.
+
+**Purpose:** Makes it easy to include the full tool call history when filing a bug
+report or GitHub issue — just attach the log file from the project's `logs/` folder.
+
+> ⚠️ **Privacy warning:** The MCP session log contains the **complete conversation
+> history** between Claude and the MCP server, including all tool parameters and
+> responses. When sharing a project directory (e.g. as a ZIP attachment in a GitHub
+> issue), **review or delete the `logs/` folder first** to avoid accidentally
+> disclosing sensitive file paths, component names, or design details.
+
+### Snapshot Logging (always active)
+
+Regardless of dev mode, `snapshot_project` now always saves a copy of the current
+MCP session log into `<project>/logs/` at each checkpoint. This means every project
+automatically retains a traceable record of which tools were called and in what order.
+
+> ⚠️ **Same privacy note applies:** the `logs/` directory inside your project folder
+> contains tool call history. Do not share it publicly without reviewing its contents.
+
+---
+
+## [2.2.2-alpha] - 2026-03-01
+
+### New MCP Tools
+
+- `route_pad_to_pad` – Convenience wrapper around `route_trace` that looks up pad positions
+  automatically. Accepts `fromRef`/`fromPad`/`toRef`/`toPad` instead of raw XY coordinates.
+  Auto-detects net from pad assignment (overridable via `net` param). Saves ~2 tool calls per
+  connection (~64 calls for a full TMC2209 board compared to the 3-step get_pad_position flow).
+  Live tested: ESP32 ↔ TMC2209 STEP/DIR traces routed without prior coordinate lookup. ✅
+
+- `copy_routing_pattern` – Now registered as MCP tool in TypeScript layer (`routing.ts`).
+  Was previously implemented in Python but missing from the MCP tool registry.
+  Parameters: `sourceRefs`, `targetRefs`, `includeVias?`, `traceWidth?`.
+
+### Bug Fixes
+
+- `add_schematic_component` / `DynamicSymbolLoader`: ignored project-local `sym-lib-table`.
+  `find_library_file()` only searched global KiCAD install directories, causing "library not
+  found" errors for any symbol in a project-local `.kicad_sym` file. Fix: added `project_path`
+  parameter; reads project `sym-lib-table` first via new `_resolve_library_from_table()` helper
+  before falling back to global dirs. `project_path` is auto-derived from the schematic path.
+
+- `place_component`: ignored project-local `fp-lib-table`. `FootprintLibraryManager` was
+  initialised once at server start without a project path, so self-created `.kicad_mod`
+  footprints were never found. Fix: new `boardPath` parameter in TypeScript + Python;
+  `_handle_place_component` wrapper recreates `FootprintLibraryManager(project_path=…)` whenever
+  the active project changes (cached to avoid redundant recreation).
+
+- `copy_routing_pattern`: copied 0 traces when pads had no net assignments. The filter
+  `track.GetNetname() in source_nets` always returned empty when pads were placed without net
+  assignment. Fix: geometric fallback using bounding box of source footprint pads ±5mm
+  tolerance. Response includes `filterMethod` field indicating which mode was used
+  (`"net-based"` or `"geometric (pads have no nets)"`).
+
+- `template_with_symbols.kicad_sch`, `template_with_symbols_expanded.kicad_sch`: restored
+  format version `20250114` (KiCAD 9) after upstream commit `2b38796` accidentally downgraded
+  both files to `20240101`. KiCAD 9 rejects schematics with outdated version numbers.
+
+- **CRITICAL: `template_with_symbols_expanded.kicad_sch`**: removed 7 invalid `;;` comment
+  lines introduced by upstream commit `b98c94b`. KiCAD's S-expression parser does not support
+  any comment syntax — it expects every non-empty, non-whitespace line to start with `(`.
+  The comments (`;; PASSIVES`, `;; SEMICONDUCTORS`, `;; INTEGRATED CIRCUITS`, `;; CONNECTORS`,
+  `;; POWER/REGULATORS`, `;; MISC`, `;; TEMPLATE INSTANCES (...)`) caused KiCAD 9 to reject
+  every schematic created from this template with a hard parse error:
+  > `Expecting '(' in <file>.kicad_sch, line 8, offset 5`
+  **Action required for existing projects:** delete every line beginning with `;;` from any
+  `.kicad_sch` file created between upstream commit `b98c94b` and this fix.
+
+- `add_schematic_component` / `inject_symbol_into_schematic`: symbol definition in
+  `lib_symbols` was never refreshed after editing via `create_symbol` / `edit_symbol`.
+  If the symbol was already present in the schematic's embedded `lib_symbols` section,
+  the function returned immediately — `delete + re-add` still pulled in the stale cached
+  definition. Fix: always read the current definition from the `.kicad_sym` file; if a
+  stale entry exists in `lib_symbols`, remove it first, then inject the fresh one.
+  Verified live. ✅
+
+- `template_with_symbols_expanded.kicad_sch`: removed 13 legacy `_TEMPLATE_*` offscreen
+  instances (`_TEMPLATE_R`, `_TEMPLATE_C`, `_TEMPLATE_U`, etc.) that were placed at
+  `x=-100` as clone-sources for the old `ComponentManager` approach. `DynamicSymbolLoader`
+  (the current implementation) injects symbols directly and never needs these placeholders.
+  They appeared as dangling reference designators in KiCAD's component navigator and in
+  the schematic canvas when zoomed far out.
+
+### Maintenance
+
+- `.gitignore`: added `*.kicad_pcb.bak`, `*.kicad_pro.bak` alongside existing `-bak` variants;
+  consolidated personal/local files under `myContribution/`.
+
+---
+
+## [2.2.1-alpha] - 2026-02-28
+
+### New MCP Tools
+
+- `edit_schematic_component` – Update properties of a placed symbol in-place (footprint,
+  value, reference rename). More efficient than delete + re-add: preserves position and UUID.
+
+### Bug Fixes
+
+- `add_schematic_component`: `footprint` parameter was accepted but silently ignored – the
+  value was never passed through to `DynamicSymbolLoader.add_component()` /
+  `create_component_instance()`. All newly placed symbols always had an empty Footprint
+  field. Fix: added `footprint: str = ""` to both functions and threaded it through every
+  call site including the TypeScript tool schema.
+
+- `delete_schematic_component`: only deleted the first matching instance when duplicate
+  references existed (e.g. after an aborted add attempt). Root cause: loop used `break`
+  after the first match. Fix: collect all matching blocks first, then delete them all back-
+  to-front (to preserve line indices). Response now includes `deleted_count`.
+
+- `templates/*.kicad_sch`, `project.py`, `schematic.py`: Update KiCAD schematic format
+  version from `20230121` (KiCAD 7) to `20250114` (KiCAD 9). The MCP server targets
+  KiCAD 9 exclusively (`pcbnew.pyd` compiled for KiCAD 9.0, Python 3.11.5) – generating
+  files in an outdated format caused a spurious "This file was created with an older
+  KiCAD version" warning on every newly created schematic.
+
+- `template_with_symbols_expanded.kicad_sch`: Remove 13 corrupt `_TEMPLATE_*` placed-symbol
+  blocks with `(lib_id -100)` – an integer caused by old sexpdata serializer (same bug
+  PR #40 fixed for the add path). KiCAD crashed with a null-pointer when selecting these
+  symbols. They appeared as grey `_TEMPLATE_R?`, `_TEMPLATE_U_REG?` etc. labels far
+  outside the sheet boundary (~5000mm off-sheet).
+
+  **Discovered via:** live testing on a real JLCPCB/KiCAD 9 project.
+  **Affected users:** schematics created from this template before this fix contain the
+  same corrupt blocks – remove all `(symbol (lib_id -100) ...)` blocks whose Reference
+  starts with `_TEMPLATE_`.
+
+---
+
+---
+
+## [2.2.0-alpha] - 2026-02-27
+
+### New MCP Tools (TypeScript layer – previously Python-only)
+
+**Routing tools:**
+- `delete_trace` - Delete traces by UUID, position or net name
+- `query_traces` - Query/filter traces on the board
+- `get_nets_list` - List all nets with net code and class
+- `modify_trace` - Modify trace width or layer
+- `create_netclass` - Create or update a net class
+- `route_differential_pair` - Route a differential pair between two points
+- `refill_zones` - Refill all copper zones ⚠️ SWIG segfault risk, prefer IPC/UI
+
+**Component tools:**
+- `get_component_pads` - Get all pad data for a component
+- `get_component_list` - List all components on the board
+- `get_pad_position` - Get absolute position of a specific pad
+- `place_component_array` - Place components in a grid array
+- `align_components` - Align components along an axis
+- `duplicate_component` - Duplicate a component with offset
+
+### Bug Fixes
+
+- `routing.py`: Fix SwigPyObject UUID comparison (`str()` → `m_Uuid.AsString()`)
+- `routing.py`: Fix SWIG iterator invalidation after `board.Remove()` by snapshotting `list(board.Tracks())`
+- `routing.py`: Add `board.SetModified()` + `track = None` after `Remove()` to prevent dangling SWIG pointer crashes
+- `routing.py`: Per-track `try/except` in `query_traces()` to skip invalid objects after bulk delete
+- `routing.py`: Add missing return statement (mypy)
+- `library.py`: Fix `search_footprints` parameter mapping (`search_term` → `pattern`)
+- `library.py`: Fix field access (`fp.name` → `fp.full_name`)
+- `library.py`: Accept both `pattern` and `search_term` parameter names
+- `library.py`: Fix loop variable shadowing `Path` object (mypy)
+- `design_rules.py`: Add type annotation for `violation_counts` (mypy)
+
+### New MCP Tools (cont.)
+
+**Datasheet tools:**
+- `get_datasheet_url` - Return LCSC datasheet PDF URL and product page URL for a given
+  LCSC number (e.g. `C179739` → `https://www.lcsc.com/datasheet/C179739.pdf`).
+  No API key required – URL is constructed directly from the LCSC number.
+- `enrich_datasheets` - Scan a `.kicad_sch` file and write LCSC datasheet URLs into
+  every symbol that has an `LCSC` property but an empty `Datasheet` field. After
+  enrichment the URL appears natively in KiCAD's symbol properties, footprint browser
+  and any other tool that reads the standard KiCAD `Datasheet` field.
+  Supports `dry_run=true` for preview without writing.
+  Implementation: `python/commands/datasheet_manager.py` (text-based, no `skip` writes)
+
+**Schematic tools:**
+- `delete_schematic_component` - Remove a placed symbol from a `.kicad_sch` file by
+  reference designator (e.g. `R1`, `U3`).
+
+### Bug Fixes (cont.)
+
+- `schematic.ts` / `kicad_interface.py`: Fix missing `delete_schematic_component` MCP tool.
+
+  **Root cause (two separate issues):**
+  1. No MCP tool named `delete_schematic_component` existed. Claude had no way to call
+     it, so any "delete schematic component" request fell through to the PCB-only
+     `delete_component` tool, which searches `pcbnew.BOARD` and always returned
+     "Component not found" for schematic symbols.
+  2. `component_schematic.py::remove_component()` still used `skip` for writes.
+     PR #40 rewrote `DynamicSymbolLoader` (add path) to avoid `skip`-induced schematic
+     corruption, but `remove_component` (delete path) was not touched by that PR.
+
+  **Fix:**
+  - Added `delete_schematic_component` to the TypeScript tool layer (`schematic.ts`)
+    with clear docstring distinguishing it from the PCB `delete_component`.
+  - Implemented `_handle_delete_schematic_component` in `kicad_interface.py` using
+    direct text manipulation (parenthesis-depth tracking, same approach as PR #40).
+    Does not call `component_schematic.py::remove_component()` at all.
+  - Error message explicitly guides the user when the wrong tool is used:
+    *"note: this tool removes schematic symbols, use delete_component for PCB footprints"*
+
+### Additional Bug Fixes
+
+- `connection_schematic.py` / `kicad_interface.py`: Fix `generate_netlist` missing
+  `schematic_path` parameter – without it `get_net_connections` always fell back to
+  proximity matching which only returns one connection per component (first wire hit,
+  then `break`). PinLocator was never invoked. Fix: added `schematic_path: Optional[Path]`
+  to `generate_netlist` signature and threaded it through to `get_net_connections`,
+  and updated `_handle_generate_netlist` in `kicad_interface.py` to pass `schematic_path`.
+- `server.ts`: Fix KiCAD bundled Python (3.11.5) not being selected on Windows – the
+  detection condition `process.env.PYTHONPATH?.includes("KiCad")` was fragile and failed
+  in some environments, causing System Python 3.12 to be used instead. Since `pcbnew.pyd`
+  is compiled for KiCAD's Python 3.11.5, this resulted in `No module named 'pcbnew'`.
+  Fix: removed the condition, KiCAD bundled Python is now always preferred on Windows
+  when it exists at `C:\Program Files\KiCad\9.0\bin\python.exe`.
+  Also added `KICAD_PYTHON` to `claude_desktop_config.json` as explicit override.
+- `pin_locator.py`: Fix `generate_netlist` timeout – `get_pin_location` and
+  `get_all_symbol_pins` called `Schematic(schematic_path)` on every single pin lookup,
+  causing O(nets × components × pins) schematic file loads (e.g. 400+ loads for a
+  medium schematic). Fix: added `_schematic_cache` dict to `PinLocator.__init__`,
+  schematic is now loaded once per path and reused.
+
+---
+
 ## [2.1.0-alpha] - 2026-01-10
 
 ### Phase 1: Intelligent Schematic Wiring System - Core Infrastructure

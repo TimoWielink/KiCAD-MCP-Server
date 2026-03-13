@@ -11,11 +11,64 @@ The [Model Context Protocol](https://modelcontextprotocol.io/) is an open standa
 - 64 fully-documented tools with JSON Schema validation
 - Smart tool discovery with router pattern (reduces AI context by 70%)
 - 8 dynamic resources exposing project state
-- JLCPCB parts integration with 100k+ component catalog and local library search
+- JLCPCB parts integration with 2.5M+ component catalog and local library search
 - Full MCP 2025-06-18 protocol compliance
 - Cross-platform support (Linux, Windows, macOS)
 - Real-time KiCAD UI integration via IPC API (experimental)
 - Comprehensive error handling and logging
+
+
+
+## Try out Arduino MCP - now you can get Claude to help in the IDE, real time!:
+https://github.com/mixelpixx/arduino-ide
+
+
+
+
+
+## What's New in v2.2.3
+
+### New Tools: FFC/Ribbon Cable Passthrough Workflow
+
+A complete workflow for designing passthrough adapter boards (e.g. Raspberry Pi CSI
+cable adapters) is now supported:
+
+1. `connect_passthrough` — wires all pins of one connector to the matching pins of
+   another in the schematic (J1 pin N → J2 pin N, auto-named nets).
+2. `sync_schematic_to_board` — imports the net assignments into the PCB.
+3. `route_pad_to_pad` — routes each connection with automatic via insertion when
+   pads are on opposite copper layers.
+4. `snapshot_project` — saves a named checkpoint into `<project>/snapshots/`.
+
+### Bug Fixes (KiCAD 9 / Windows)
+
+- **Via insertion for B.Cu footprints** — `route_pad_to_pad` now correctly detects
+  when a footprint is on B.Cu and inserts the required via. (KiCAD 9 SWIG returned
+  `F.Cu` for all SMD pads regardless of layer — fixed.)
+- **Board outline rounded corners** — `add_board_outline` now correctly applies
+  `cornerRadius` when `shape="rounded_rectangle"`.
+- **B.Cu placement hang** — placing a footprint on B.Cu no longer causes a ~30s
+  freeze in KiCAD 9.
+
+### Developer Mode
+
+Set `KICAD_MCP_DEV=1` in your Claude Desktop MCP environment to automatically save
+the MCP session log into the project's `logs/` folder on every `export_gerber` and
+`snapshot_project` call. Useful for debugging and for attaching to GitHub issues.
+
+```json
+"env": {
+  "KICAD_MCP_DEV": "1"
+}
+```
+
+> ⚠️ **Privacy warning:** The session log contains your full tool call history
+> (including file paths and design details). **Review or delete `logs/` before
+> sharing a project directory publicly.**
+
+See [CHANGELOG](CHANGELOG.md) for the full list of changes in this release.
+
+---
 
 ## What's New in v2.1.0
 
@@ -129,7 +182,7 @@ Complete integration with JLCPCB's parts catalog, providing two complementary ap
 
 **Dual-Mode Architecture:**
 1. **Local Symbol Libraries** - Search JLCPCB libraries installed via KiCAD Plugin and Content Manager (contributed by [@l3wi](https://github.com/l3wi))
-2. **JLCPCB API Integration** - Access the complete 100k+ parts catalog with real-time pricing and stock data
+2. **JLCPCB API Integration** - Access the complete 2.5M+ parts catalog with real-time pricing and stock data
 
 **Key Features:**
 - Real-time pricing with quantity breaks (1+, 10+, 100+, 1000+)
@@ -221,7 +274,7 @@ The server provides 64 tools organized into functional categories. With the new 
 
 ### JLCPCB Integration (5 tools)
 - `download_jlcpcb_database` - Download complete JLCPCB parts catalog (one-time setup)
-- `search_jlcpcb_parts` - Search 100k+ parts with parametric filters
+- `search_jlcpcb_parts` - Search 2.5M+ parts with parametric filters
 - `get_jlcpcb_part` - Get detailed part info with pricing and footprints
 - `get_jlcpcb_database_stats` - View database statistics and coverage
 - `suggest_jlcpcb_alternatives` - Find cheaper or more available alternatives
@@ -363,19 +416,31 @@ See [Windows Installation Guide](docs/WINDOWS_SETUP.md) for detailed instruction
 
 ### macOS
 
+**Important:** On macOS, use KiCAD's bundled Python to ensure proper access to pcbnew module.
+
 ```bash
 # Install KiCAD 9.0 from kicad.org/download/macos
 
 # Install Node.js
 brew install node@20
 
-# Clone and build
+# Clone repository
 git clone https://github.com/mixelpixx/KiCAD-MCP-Server.git
 cd KiCAD-MCP-Server
+
+# Create virtual environment using KiCAD's bundled Python
+/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3 -m venv venv --system-site-packages
+
+# Activate virtual environment
+source venv/bin/activate
+
+# Install dependencies
 npm install
-pip3 install -r requirements.txt
+pip install -r requirements.txt
 npm run build
 ```
+
+**Note:** The `--system-site-packages` flag is required to access KiCAD's pcbnew module from the virtual environment.
 
 ## Configuration
 
@@ -457,7 +522,22 @@ Claude Code automatically detects MCP servers in the current directory. No addit
 
 The JLCPCB integration provides two modes that can be used independently or together:
 
-**Mode 1: Local Symbol Libraries (No Setup Required)**
+**Mode 1: JLCSearch Public API (Recommended - No Setup Required)**
+
+The easiest way to access JLCPCB's parts catalog:
+- No API credentials needed
+- No JLCPCB account required
+- Access to 2.5M+ parts with pricing and stock data
+- Download time: 40-60 minutes for full catalog (100-part batches due to API limit)
+
+To download the database:
+```
+Ask Claude: "Download the JLCPCB parts database"
+```
+
+This creates a local SQLite database at `data/jlcpcb_parts.db` (3-5 GB for full 2.5M+ part catalog).
+
+**Mode 2: Local Symbol Libraries (No Setup Required)**
 
 Install JLCPCB libraries via KiCAD's Plugin and Content Manager:
 1. Open KiCAD
@@ -466,14 +546,15 @@ Install JLCPCB libraries via KiCAD's Plugin and Content Manager:
 4. Install libraries like `JLCPCB-KiCAD-Library` or `EDA_MCP`
 5. Use `search_symbols` to find components with pre-configured footprints and LCSC IDs
 
-**Mode 2: JLCPCB API (Complete Catalog Access)**
+**Mode 3: Official JLCPCB API (Advanced - Requires Enterprise Account)**
 
-For access to the full 100k+ parts catalog with pricing:
+For users with JLCPCB enterprise accounts and order history:
 
 1. **Get API Credentials**
    - Log in to [JLCPCB](https://jlcpcb.com/)
-   - Navigate to Account > API Management
-   - Create API credentials and save your `appId`, `appKey`, and `appSecret`
+   - Navigate to Account > API Management (requires enterprise approval)
+   - Create API Key and save your `appKey` and `appSecret`
+   - Note: This requires prior order history and enterprise account approval
 
 2. **Configure Environment Variables**
 
@@ -490,12 +571,6 @@ For access to the full 100k+ parts catalog with pricing:
    JLCPCB_API_KEY=your_app_key_here
    JLCPCB_API_SECRET=your_app_secret_here
    ```
-
-3. **Download Parts Database (One-time setup, takes 5-10 minutes)**
-   ```
-   Ask Claude: "Download the JLCPCB parts database"
-   ```
-   This creates a local SQLite database at `data/jlcpcb_parts.db` with ~100k parts.
 
 See [JLCPCB Usage Guide](docs/JLCPCB_USAGE_GUIDE.md) for detailed documentation.
 
@@ -741,7 +816,7 @@ npm run format
 - UI auto-launch
 - Full MCP protocol compliance
 - JLCPCB parts integration (local libraries + JLCSearch API)
-- Cost optimization and component selection with 100k+ parts catalog
+- Cost optimization and component selection with 2.5M+ parts catalog
 
 **Under Active Development (IPC Backend):**
 - Real-time UI synchronization via KiCAD 9.0 IPC API
@@ -823,6 +898,8 @@ If you use this project in your research or publication, please cite:
   version = {2.1.0-alpha}
 }
 ```
+
+
 
 
 

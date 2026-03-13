@@ -223,6 +223,9 @@ try:
     from commands.library_symbol import SymbolLibraryManager, SymbolLibraryCommands
     from commands.jlcpcb import JLCPCBClient, test_jlcpcb_connection
     from commands.jlcpcb_parts import JLCPCBPartsManager
+    from commands.datasheet_manager import DatasheetManager
+    from commands.footprint import FootprintCreator
+    from commands.symbol_creator import SymbolCreator
 
     logger.info("Successfully imported all command handlers")
 except ImportError as e:
@@ -270,6 +273,7 @@ class KiCADInterface:
         self.design_rule_commands = DesignRuleCommands(self.board)
         self.export_commands = ExportCommands(self.board)
         self.library_commands = LibraryCommands(self.footprint_library)
+        self._current_project_path: Optional[Path] = None  # set when boardPath is known
 
         # Initialize symbol library manager (for searching local KiCad symbol libraries)
         self.symbol_library_commands = SymbolLibraryCommands()
@@ -290,6 +294,7 @@ class KiCADInterface:
             "create_project": self.project_commands.create_project,
             "open_project": self.project_commands.open_project,
             "save_project": self.project_commands.save_project,
+            "snapshot_project": self._handle_snapshot_project,
             "get_project_info": self.project_commands.get_project_info,
             # Board commands
             "set_board_size": self.board_commands.set_board_size,
@@ -304,7 +309,8 @@ class KiCADInterface:
             "add_text": self.board_commands.add_text,
             "add_board_text": self.board_commands.add_text,  # Alias for TypeScript tool
             # Component commands
-            "place_component": self.component_commands.place_component,
+            "route_pad_to_pad": self.routing_commands.route_pad_to_pad,
+            "place_component": self._handle_place_component,
             "move_component": self.component_commands.move_component,
             "rotate_component": self.component_commands.rotate_component,
             "delete_component": self.component_commands.delete_component,
@@ -357,18 +363,28 @@ class KiCADInterface:
             "get_jlcpcb_part": self._handle_get_jlcpcb_part,
             "get_jlcpcb_database_stats": self._handle_get_jlcpcb_database_stats,
             "suggest_jlcpcb_alternatives": self._handle_suggest_jlcpcb_alternatives,
+            # Datasheet commands
+            "enrich_datasheets": self._handle_enrich_datasheets,
+            "get_datasheet_url": self._handle_get_datasheet_url,
             # Schematic commands
             "create_schematic": self._handle_create_schematic,
             "load_schematic": self._handle_load_schematic,
             "add_schematic_component": self._handle_add_schematic_component,
+            "delete_schematic_component": self._handle_delete_schematic_component,
+            "edit_schematic_component": self._handle_edit_schematic_component,
             "add_schematic_wire": self._handle_add_schematic_wire,
             "add_schematic_connection": self._handle_add_schematic_connection,
             "add_schematic_net_label": self._handle_add_schematic_net_label,
             "connect_to_net": self._handle_connect_to_net,
+            "connect_passthrough": self._handle_connect_passthrough,
+            "get_schematic_pin_locations": self._handle_get_schematic_pin_locations,
             "get_net_connections": self._handle_get_net_connections,
+            "run_erc": self._handle_run_erc,
             "generate_netlist": self._handle_generate_netlist,
+            "sync_schematic_to_board": self._handle_sync_schematic_to_board,
             "list_schematic_libraries": self._handle_list_schematic_libraries,
             "export_schematic_pdf": self._handle_export_schematic_pdf,
+            "import_svg_logo": self._handle_import_svg_logo,
             # UI/Process management commands
             "check_kicad_ui": self._handle_check_kicad_ui,
             "launch_kicad_ui": self._handle_launch_kicad_ui,
@@ -381,6 +397,16 @@ class KiCADInterface:
             "ipc_get_tracks": self._handle_ipc_get_tracks,
             "ipc_get_vias": self._handle_ipc_get_vias,
             "ipc_save_board": self._handle_ipc_save_board,
+            # Footprint commands
+            "create_footprint": self._handle_create_footprint,
+            "edit_footprint_pad": self._handle_edit_footprint_pad,
+            "list_footprint_libraries": self._handle_list_footprint_libraries,
+            "register_footprint_library": self._handle_register_footprint_library,
+            # Symbol creator commands
+            "create_symbol": self._handle_create_symbol,
+            "delete_symbol": self._handle_delete_symbol,
+            "list_symbols_in_library": self._handle_list_symbols_in_library,
+            "register_symbol_library": self._handle_register_symbol_library,
         }
 
         logger.info(
@@ -470,6 +496,11 @@ class KiCADInterface:
                         # Get board from the project commands handler
                         self.board = self.project_commands.board
                         self._update_command_handlers()
+                    elif command in self._BOARD_MUTATING_COMMANDS:
+                        # Auto-save after every board mutation via SWIG.
+                        # Prevents data loss if Claude hits context limit before
+                        # an explicit save_project call.
+                        self._auto_save_board()
 
                 return result
             else:
@@ -489,6 +520,29 @@ class KiCADInterface:
                 "message": f"Error handling command: {command}",
                 "errorDetails": f"{str(e)}\n{traceback_str}",
             }
+
+    # Board-mutating commands that trigger auto-save on SWIG path
+    _BOARD_MUTATING_COMMANDS = {
+        "place_component", "move_component", "rotate_component", "delete_component",
+        "route_trace", "route_pad_to_pad", "add_via", "delete_trace", "add_net",
+        "add_board_outline", "add_mounting_hole", "add_text", "add_board_text",
+        "add_copper_pour", "refill_zones", "import_svg_logo",
+        "sync_schematic_to_board", "connect_passthrough",
+    }
+
+    def _auto_save_board(self):
+        """Save board to disk after SWIG mutations.
+        Called automatically after every board-mutating SWIG command so that
+        data is not lost if Claude hits the context limit before save_project.
+        """
+        try:
+            if self.board:
+                board_path = self.board.GetFileName()
+                if board_path:
+                    pcbnew.SaveBoard(board_path, self.board)
+                    logger.debug(f"Auto-saved board to: {board_path}")
+        except Exception as e:
+            logger.warning(f"Auto-save failed: {e}")
 
     def _update_command_handlers(self):
         """Update board reference in all command handlers"""
@@ -561,6 +615,47 @@ class KiCADInterface:
             logger.error(f"Error loading schematic: {str(e)}")
             return {"success": False, "message": str(e)}
 
+    def _handle_place_component(self, params):
+        """Place a component on the PCB, with project-local fp-lib-table support.
+        If boardPath is given and differs from the currently loaded board, the
+        board is reloaded from boardPath before placing — prevents silent failures
+        when Claude provides a boardPath that was not yet loaded.
+        """
+        from pathlib import Path
+
+        board_path = params.get("boardPath")
+        if board_path:
+            board_path_norm = str(Path(board_path).resolve())
+            current_board_file = (
+                str(Path(self.board.GetFileName()).resolve()) if self.board else ""
+            )
+            if board_path_norm != current_board_file:
+                logger.info(
+                    f"boardPath differs from current board — reloading: {board_path}"
+                )
+                try:
+                    self.board = pcbnew.LoadBoard(board_path)
+                    self._update_command_handlers()
+                    logger.info("Board reloaded from boardPath")
+                except Exception as e:
+                    logger.error(f"Failed to reload board from boardPath: {e}")
+                    return {
+                        "success": False,
+                        "message": f"Could not load board from boardPath: {board_path}",
+                        "errorDetails": str(e),
+                    }
+
+            project_path = Path(board_path).parent
+            if project_path != getattr(self, "_current_project_path", None):
+                self._current_project_path = project_path
+                local_lib = FootprintLibraryManager(project_path=project_path)
+                self.component_commands = ComponentCommands(self.board, local_lib)
+                logger.info(
+                    f"Reloaded FootprintLibraryManager with project_path={project_path}"
+                )
+
+        return self.component_commands.place_component(params)
+
     def _handle_add_schematic_component(self, params):
         """Add a component to a schematic using text-based injection (no sexpdata)"""
         logger.info("Adding component to schematic")
@@ -580,18 +675,25 @@ class KiCADInterface:
             library = component.get("library", "Device")
             reference = component.get("reference", "X?")
             value = component.get("value", comp_type)
+            footprint = component.get("footprint", "")
             x = component.get("x", 0)
             y = component.get("y", 0)
 
-            loader = DynamicSymbolLoader()
+            # Derive project path from schematic path for project-local library resolution
+            schematic_file = Path(schematic_path)
+            derived_project_path = schematic_file.parent
+
+            loader = DynamicSymbolLoader(project_path=derived_project_path)
             loader.add_component(
-                Path(schematic_path),
+                schematic_file,
                 library,
                 comp_type,
                 reference=reference,
                 value=value,
+                footprint=footprint,
                 x=x,
                 y=y,
+                project_path=derived_project_path,
             )
 
             return {
@@ -601,6 +703,253 @@ class KiCADInterface:
             }
         except Exception as e:
             logger.error(f"Error adding component to schematic: {str(e)}")
+            import traceback
+
+            logger.error(traceback.format_exc())
+            return {"success": False, "message": str(e)}
+
+    def _handle_delete_schematic_component(self, params):
+        """Remove a placed symbol from a schematic using text-based manipulation (no skip writes)"""
+        logger.info("Deleting schematic component")
+        try:
+            from pathlib import Path
+            import re
+
+            schematic_path = params.get("schematicPath")
+            reference = params.get("reference")
+
+            if not schematic_path:
+                return {"success": False, "message": "schematicPath is required"}
+            if not reference:
+                return {"success": False, "message": "reference is required"}
+
+            sch_file = Path(schematic_path)
+            if not sch_file.exists():
+                return {
+                    "success": False,
+                    "message": f"Schematic not found: {schematic_path}",
+                }
+
+            with open(sch_file, "r", encoding="utf-8") as f:
+                lines = f.read().split("\n")
+
+            # Find lib_symbols range to skip it
+            lib_sym_start, lib_sym_end = None, None
+            depth = 0
+            for i, line in enumerate(lines):
+                if "(lib_symbols" in line and lib_sym_start is None:
+                    lib_sym_start = i
+                    depth = sum(1 for c in line if c == "(") - sum(
+                        1 for c in line if c == ")"
+                    )
+                elif lib_sym_start is not None and lib_sym_end is None:
+                    depth += sum(1 for c in line if c == "(") - sum(
+                        1 for c in line if c == ")"
+                    )
+                    if depth == 0:
+                        lib_sym_end = i
+                        break
+
+            # Find ALL placed symbol blocks matching the reference (handles duplicates)
+            blocks_to_delete = []
+            i = 0
+            while i < len(lines):
+                # Skip lib_symbols
+                if lib_sym_start is not None and lib_sym_end is not None:
+                    if lib_sym_start <= i <= lib_sym_end:
+                        i += 1
+                        continue
+
+                if re.match(r"\s*\(symbol\s+\(lib_id\s+\"", lines[i]):
+                    b_start = i
+                    b_depth = sum(1 for c in lines[i] if c == "(") - sum(
+                        1 for c in lines[i] if c == ")"
+                    )
+                    j = i + 1
+                    while j < len(lines) and b_depth > 0:
+                        b_depth += sum(1 for c in lines[j] if c == "(") - sum(
+                            1 for c in lines[j] if c == ")"
+                        )
+                        j += 1
+                    b_end = j - 1
+
+                    block_text = "\n".join(lines[b_start : b_end + 1])
+                    if re.search(
+                        r'\(property\s+"Reference"\s+"' + re.escape(reference) + r'"',
+                        block_text,
+                    ):
+                        blocks_to_delete.append((b_start, b_end))
+
+                    i = b_end + 1
+                    continue
+
+                i += 1
+
+            if not blocks_to_delete:
+                return {
+                    "success": False,
+                    "message": f"Component '{reference}' not found in schematic (note: this tool removes schematic symbols, use delete_component for PCB footprints)",
+                }
+
+            # Delete from back to front to preserve line indices
+            for b_start, b_end in sorted(blocks_to_delete, reverse=True):
+                del lines[b_start : b_end + 1]
+                if b_start < len(lines) and lines[b_start].strip() == "":
+                    del lines[b_start]
+
+            with open(sch_file, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+
+            deleted_count = len(blocks_to_delete)
+            logger.info(
+                f"Deleted {deleted_count} instance(s) of {reference} from {sch_file.name}"
+            )
+            return {
+                "success": True,
+                "reference": reference,
+                "deleted_count": deleted_count,
+                "schematic": str(sch_file),
+            }
+
+        except Exception as e:
+            logger.error(f"Error deleting schematic component: {e}")
+            import traceback
+
+            logger.error(traceback.format_exc())
+            return {"success": False, "message": str(e)}
+
+    def _handle_edit_schematic_component(self, params):
+        """Update properties of a placed symbol in a schematic (footprint, value, reference).
+        Uses text-based in-place editing – preserves position, UUID and all other fields.
+        """
+        logger.info("Editing schematic component")
+        try:
+            from pathlib import Path
+            import re
+
+            schematic_path = params.get("schematicPath")
+            reference = params.get("reference")
+            new_footprint = params.get("footprint")
+            new_value = params.get("value")
+            new_reference = params.get("newReference")
+
+            if not schematic_path:
+                return {"success": False, "message": "schematicPath is required"}
+            if not reference:
+                return {"success": False, "message": "reference is required"}
+            if not any(
+                [
+                    new_footprint is not None,
+                    new_value is not None,
+                    new_reference is not None,
+                ]
+            ):
+                return {
+                    "success": False,
+                    "message": "At least one of footprint, value, or newReference must be provided",
+                }
+
+            sch_file = Path(schematic_path)
+            if not sch_file.exists():
+                return {
+                    "success": False,
+                    "message": f"Schematic not found: {schematic_path}",
+                }
+
+            with open(sch_file, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            def find_matching_paren(s, start):
+                """Find the position of the closing paren matching the opening paren at start."""
+                depth = 0
+                i = start
+                while i < len(s):
+                    if s[i] == "(":
+                        depth += 1
+                    elif s[i] == ")":
+                        depth -= 1
+                        if depth == 0:
+                            return i
+                    i += 1
+                return -1
+
+            # Skip lib_symbols section
+            lib_sym_pos = content.find("(lib_symbols")
+            lib_sym_end = (
+                find_matching_paren(content, lib_sym_pos) if lib_sym_pos >= 0 else -1
+            )
+
+            # Find placed symbol blocks that match the reference
+            # Search for (symbol (lib_id "...") ... (property "Reference" "<ref>" ...) ...)
+            block_start = block_end = None
+            search_start = 0
+            pattern = re.compile(r'\(symbol\s+\(lib_id\s+"')
+            while True:
+                m = pattern.search(content, search_start)
+                if not m:
+                    break
+                pos = m.start()
+                # Skip if inside lib_symbols section
+                if lib_sym_pos >= 0 and lib_sym_pos <= pos <= lib_sym_end:
+                    search_start = lib_sym_end + 1
+                    continue
+                end = find_matching_paren(content, pos)
+                if end < 0:
+                    search_start = pos + 1
+                    continue
+                block_text = content[pos : end + 1]
+                if re.search(
+                    r'\(property\s+"Reference"\s+"' + re.escape(reference) + r'"',
+                    block_text,
+                ):
+                    block_start, block_end = pos, end
+                    break
+                search_start = end + 1
+
+            if block_start is None:
+                return {
+                    "success": False,
+                    "message": f"Component '{reference}' not found in schematic",
+                }
+
+            # Apply property replacements within the found block
+            block_text = content[block_start : block_end + 1]
+            if new_footprint is not None:
+                block_text = re.sub(
+                    r'(\(property\s+"Footprint"\s+)"[^"]*"',
+                    rf'\1"{new_footprint}"',
+                    block_text,
+                )
+            if new_value is not None:
+                block_text = re.sub(
+                    r'(\(property\s+"Value"\s+)"[^"]*"', rf'\1"{new_value}"', block_text
+                )
+            if new_reference is not None:
+                block_text = re.sub(
+                    r'(\(property\s+"Reference"\s+)"[^"]*"',
+                    rf'\1"{new_reference}"',
+                    block_text,
+                )
+
+            content = content[:block_start] + block_text + content[block_end + 1 :]
+
+            with open(sch_file, "w", encoding="utf-8") as f:
+                f.write(content)
+
+            changes = {
+                k: v
+                for k, v in {
+                    "footprint": new_footprint,
+                    "value": new_value,
+                    "reference": new_reference,
+                }.items()
+                if v is not None
+            }
+            logger.info(f"Edited schematic component {reference}: {changes}")
+            return {"success": True, "reference": reference, "updated": changes}
+
+        except Exception as e:
+            logger.error(f"Error editing schematic component: {e}")
             import traceback
 
             logger.error(traceback.format_exc())
@@ -665,6 +1014,154 @@ class KiCADInterface:
         except Exception as e:
             logger.error(f"Error listing schematic libraries: {str(e)}")
             return {"success": False, "message": str(e)}
+
+    # ------------------------------------------------------------------ #
+    #  Footprint handlers                                                  #
+    # ------------------------------------------------------------------ #
+
+    def _handle_create_footprint(self, params):
+        """Create a new .kicad_mod footprint file in a .pretty library."""
+        logger.info(
+            f"create_footprint: {params.get('name')} in {params.get('libraryPath')}"
+        )
+        try:
+            creator = FootprintCreator()
+            return creator.create_footprint(
+                library_path=params.get("libraryPath", ""),
+                name=params.get("name", ""),
+                description=params.get("description", ""),
+                tags=params.get("tags", ""),
+                pads=params.get("pads", []),
+                courtyard=params.get("courtyard"),
+                silkscreen=params.get("silkscreen"),
+                fab_layer=params.get("fabLayer"),
+                ref_position=params.get("refPosition"),
+                value_position=params.get("valuePosition"),
+                overwrite=params.get("overwrite", False),
+            )
+        except Exception as e:
+            logger.error(f"create_footprint error: {e}")
+            return {"success": False, "error": str(e)}
+
+    def _handle_edit_footprint_pad(self, params):
+        """Edit an existing pad in a .kicad_mod file."""
+        logger.info(
+            f"edit_footprint_pad: pad {params.get('padNumber')} in {params.get('footprintPath')}"
+        )
+        try:
+            creator = FootprintCreator()
+            return creator.edit_footprint_pad(
+                footprint_path=params.get("footprintPath", ""),
+                pad_number=str(params.get("padNumber", "1")),
+                size=params.get("size"),
+                at=params.get("at"),
+                drill=params.get("drill"),
+                shape=params.get("shape"),
+            )
+        except Exception as e:
+            logger.error(f"edit_footprint_pad error: {e}")
+            return {"success": False, "error": str(e)}
+
+    def _handle_list_footprint_libraries(self, params):
+        """List .pretty footprint libraries and their contents."""
+        logger.info("list_footprint_libraries")
+        try:
+            creator = FootprintCreator()
+            return creator.list_footprint_libraries(
+                search_paths=params.get("searchPaths")
+            )
+        except Exception as e:
+            logger.error(f"list_footprint_libraries error: {e}")
+            return {"success": False, "error": str(e)}
+
+    def _handle_register_footprint_library(self, params):
+        """Register a .pretty library in KiCAD's fp-lib-table."""
+        logger.info(f"register_footprint_library: {params.get('libraryPath')}")
+        try:
+            creator = FootprintCreator()
+            return creator.register_footprint_library(
+                library_path=params.get("libraryPath", ""),
+                library_name=params.get("libraryName"),
+                description=params.get("description", ""),
+                scope=params.get("scope", "project"),
+                project_path=params.get("projectPath"),
+            )
+        except Exception as e:
+            logger.error(f"register_footprint_library error: {e}")
+            return {"success": False, "error": str(e)}
+
+    # ------------------------------------------------------------------ #
+    #  Symbol creator handlers                                             #
+    # ------------------------------------------------------------------ #
+
+    def _handle_create_symbol(self, params):
+        """Create a new symbol in a .kicad_sym library."""
+        logger.info(
+            f"create_symbol: {params.get('name')} in {params.get('libraryPath')}"
+        )
+        try:
+            creator = SymbolCreator()
+            return creator.create_symbol(
+                library_path=params.get("libraryPath", ""),
+                name=params.get("name", ""),
+                reference_prefix=params.get("referencePrefix", "U"),
+                description=params.get("description", ""),
+                keywords=params.get("keywords", ""),
+                datasheet=params.get("datasheet", "~"),
+                footprint=params.get("footprint", ""),
+                in_bom=params.get("inBom", True),
+                on_board=params.get("onBoard", True),
+                pins=params.get("pins", []),
+                rectangles=params.get("rectangles", []),
+                polylines=params.get("polylines", []),
+                overwrite=params.get("overwrite", False),
+            )
+        except Exception as e:
+            logger.error(f"create_symbol error: {e}")
+            return {"success": False, "error": str(e)}
+
+    def _handle_delete_symbol(self, params):
+        """Delete a symbol from a .kicad_sym library."""
+        logger.info(
+            f"delete_symbol: {params.get('name')} from {params.get('libraryPath')}"
+        )
+        try:
+            creator = SymbolCreator()
+            return creator.delete_symbol(
+                library_path=params.get("libraryPath", ""),
+                name=params.get("name", ""),
+            )
+        except Exception as e:
+            logger.error(f"delete_symbol error: {e}")
+            return {"success": False, "error": str(e)}
+
+    def _handle_list_symbols_in_library(self, params):
+        """List all symbols in a .kicad_sym file."""
+        logger.info(f"list_symbols_in_library: {params.get('libraryPath')}")
+        try:
+            creator = SymbolCreator()
+            return creator.list_symbols(
+                library_path=params.get("libraryPath", ""),
+            )
+        except Exception as e:
+            logger.error(f"list_symbols_in_library error: {e}")
+            return {"success": False, "error": str(e)}
+
+    def _handle_register_symbol_library(self, params):
+        """Register a .kicad_sym library in KiCAD's sym-lib-table."""
+        logger.info(f"register_symbol_library: {params.get('libraryPath')}")
+        try:
+            creator = SymbolCreator()
+            return creator.register_symbol_library(
+                library_path=params.get("libraryPath", ""),
+                library_name=params.get("libraryName"),
+                description=params.get("description", ""),
+                scope=params.get("scope", "project"),
+                project_path=params.get("projectPath"),
+            )
+        except Exception as e:
+            logger.error(f"register_symbol_library error: {e}")
+            return {"success": False, "error": str(e)}
 
     def _handle_export_schematic_pdf(self, params):
         """Export schematic to PDF"""
@@ -850,6 +1347,80 @@ class KiCADInterface:
                 "errorDetails": traceback.format_exc(),
             }
 
+    def _handle_connect_passthrough(self, params):
+        """Connect all pins of source connector to matching pins of target connector"""
+        logger.info("Connecting passthrough between two connectors")
+        try:
+            from pathlib import Path
+
+            schematic_path = params.get("schematicPath")
+            source_ref = params.get("sourceRef")
+            target_ref = params.get("targetRef")
+            net_prefix = params.get("netPrefix", "PIN")
+            pin_offset = int(params.get("pinOffset", 0))
+
+            if not all([schematic_path, source_ref, target_ref]):
+                return {"success": False, "message": "Missing required parameters: schematicPath, sourceRef, targetRef"}
+
+            result = ConnectionManager.connect_passthrough(
+                Path(schematic_path), source_ref, target_ref, net_prefix, pin_offset
+            )
+
+            n_ok = len(result["connected"])
+            n_fail = len(result["failed"])
+            return {
+                "success": n_fail == 0,
+                "message": f"Passthrough complete: {n_ok} connected, {n_fail} failed",
+                "connected": result["connected"],
+                "failed": result["failed"],
+            }
+        except Exception as e:
+            logger.error(f"Error in connect_passthrough: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {"success": False, "message": str(e)}
+
+    def _handle_get_schematic_pin_locations(self, params):
+        """Return exact pin endpoint coordinates for a schematic component"""
+        logger.info("Getting schematic pin locations")
+        try:
+            from pathlib import Path
+            from commands.pin_locator import PinLocator
+
+            schematic_path = params.get("schematicPath")
+            reference = params.get("reference")
+
+            if not all([schematic_path, reference]):
+                return {"success": False, "message": "Missing required parameters: schematicPath, reference"}
+
+            locator = PinLocator()
+            all_pins = locator.get_all_symbol_pins(Path(schematic_path), reference)
+
+            if not all_pins:
+                return {"success": False, "message": f"No pins found for {reference} — check reference and schematic path"}
+
+            # Enrich with pin names and angles from the symbol definition
+            pins_def = locator.get_symbol_pins(
+                Path(schematic_path),
+                locator._get_lib_id(Path(schematic_path), reference),
+            ) if hasattr(locator, "_get_lib_id") else {}
+
+            result = {}
+            for pin_num, coords in all_pins.items():
+                entry = {"x": coords[0], "y": coords[1]}
+                if pin_num in pins_def:
+                    entry["name"] = pins_def[pin_num].get("name", pin_num)
+                    entry["angle"] = locator.get_pin_angle(Path(schematic_path), reference, pin_num) or 0
+                result[pin_num] = entry
+
+            return {"success": True, "reference": reference, "pins": result}
+
+        except Exception as e:
+            logger.error(f"Error getting pin locations: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {"success": False, "message": str(e)}
+
     def _handle_get_net_connections(self, params):
         """Get all connections for a named net"""
         logger.info("Getting net connections")
@@ -870,6 +1441,88 @@ class KiCADInterface:
             logger.error(f"Error getting net connections: {str(e)}")
             return {"success": False, "message": str(e)}
 
+    def _handle_run_erc(self, params):
+        """Run Electrical Rules Check on a schematic via kicad-cli"""
+        logger.info("Running ERC on schematic")
+        import subprocess
+        import tempfile
+        import os
+
+        try:
+            schematic_path = params.get("schematicPath")
+            if not schematic_path or not os.path.exists(schematic_path):
+                return {
+                    "success": False,
+                    "message": "Schematic file not found",
+                    "errorDetails": f"Path does not exist: {schematic_path}",
+                }
+
+            kicad_cli = self.design_rule_commands._find_kicad_cli()
+            if not kicad_cli:
+                return {
+                    "success": False,
+                    "message": "kicad-cli not found",
+                    "errorDetails": "Install KiCAD 8.0+ or add kicad-cli to PATH.",
+                }
+
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp:
+                json_output = tmp.name
+
+            try:
+                cmd = [kicad_cli, "sch", "erc", "--format", "json", "--output", json_output, schematic_path]
+                logger.info(f"Running ERC command: {' '.join(cmd)}")
+
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+
+                if result.returncode != 0:
+                    logger.error(f"ERC command failed: {result.stderr}")
+                    return {
+                        "success": False,
+                        "message": "ERC command failed",
+                        "errorDetails": result.stderr,
+                    }
+
+                with open(json_output, "r", encoding="utf-8") as f:
+                    erc_data = json.load(f)
+
+                violations = []
+                severity_counts = {"error": 0, "warning": 0, "info": 0}
+
+                for v in erc_data.get("violations", []):
+                    vseverity = v.get("severity", "error")
+                    items = v.get("items", [])
+                    loc = {}
+                    if items and "pos" in items[0]:
+                        loc = {"x": items[0]["pos"].get("x", 0), "y": items[0]["pos"].get("y", 0)}
+                    violations.append({
+                        "type": v.get("type", "unknown"),
+                        "severity": vseverity,
+                        "message": v.get("description", ""),
+                        "location": loc,
+                    })
+                    if vseverity in severity_counts:
+                        severity_counts[vseverity] += 1
+
+                return {
+                    "success": True,
+                    "message": f"ERC complete: {len(violations)} violation(s)",
+                    "summary": {
+                        "total": len(violations),
+                        "by_severity": severity_counts,
+                    },
+                    "violations": violations,
+                }
+
+            finally:
+                if os.path.exists(json_output):
+                    os.unlink(json_output)
+
+        except subprocess.TimeoutExpired:
+            return {"success": False, "message": "ERC timed out after 120 seconds"}
+        except Exception as e:
+            logger.error(f"Error running ERC: {str(e)}")
+            return {"success": False, "message": str(e)}
+
     def _handle_generate_netlist(self, params):
         """Generate netlist from schematic"""
         logger.info("Generating netlist from schematic")
@@ -883,10 +1536,240 @@ class KiCADInterface:
             if not schematic:
                 return {"success": False, "message": "Failed to load schematic"}
 
-            netlist = ConnectionManager.generate_netlist(schematic)
+            netlist = ConnectionManager.generate_netlist(
+                schematic, schematic_path=schematic_path
+            )
             return {"success": True, "netlist": netlist}
         except Exception as e:
             logger.error(f"Error generating netlist: {str(e)}")
+            return {"success": False, "message": str(e)}
+
+    def _handle_sync_schematic_to_board(self, params):
+        """Sync schematic netlist to PCB board (equivalent to KiCAD F8 'Update PCB from Schematic').
+        Reads net connections from the schematic and assigns them to the matching pads in the PCB."""
+        logger.info("Syncing schematic to board")
+        try:
+            from pathlib import Path
+            schematic_path = params.get("schematicPath")
+            board_path = params.get("boardPath")
+
+            # Determine board to work with
+            board = None
+            if board_path:
+                board = pcbnew.LoadBoard(board_path)
+            elif self.board:
+                board = self.board
+                board_path = board.GetFileName() if not board_path else board_path
+            else:
+                return {"success": False, "message": "No board loaded. Use open_project first or provide boardPath."}
+
+            if not board_path:
+                board_path = board.GetFileName()
+
+            # Determine schematic path if not provided
+            if not schematic_path:
+                sch = Path(board_path).with_suffix(".kicad_sch")
+                if sch.exists():
+                    schematic_path = str(sch)
+                else:
+                    project_dir = Path(board_path).parent
+                    sch_files = list(project_dir.glob("*.kicad_sch"))
+                    if sch_files:
+                        schematic_path = str(sch_files[0])
+
+            if not schematic_path or not Path(schematic_path).exists():
+                return {"success": False, "message": f"Schematic not found. Provide schematicPath. Tried: {schematic_path}"}
+
+            # Generate netlist from schematic
+            schematic = SchematicManager.load_schematic(schematic_path)
+            if not schematic:
+                return {"success": False, "message": "Failed to load schematic"}
+
+            netlist = ConnectionManager.generate_netlist(schematic, schematic_path=schematic_path)
+
+            # Build (reference, pad_number) -> net_name map
+            pad_net_map = {}  # {(ref, pin_str): net_name}
+            net_names = set()
+            for net_entry in netlist.get("nets", []):
+                net_name = net_entry["name"]
+                net_names.add(net_name)
+                for conn in net_entry.get("connections", []):
+                    ref = conn.get("component", "")
+                    pin = str(conn.get("pin", ""))
+                    if ref and pin and pin != "unknown":
+                        pad_net_map[(ref, pin)] = net_name
+
+            # Add all nets to board
+            netinfo = board.GetNetInfo()
+            nets_by_name = netinfo.NetsByName()
+            added_nets = []
+            for net_name in net_names:
+                if not nets_by_name.has_key(net_name):
+                    net_item = pcbnew.NETINFO_ITEM(board, net_name)
+                    board.Add(net_item)
+                    added_nets.append(net_name)
+
+            # Refresh nets map after additions
+            netinfo = board.GetNetInfo()
+            nets_by_name = netinfo.NetsByName()
+
+            # Assign nets to pads
+            assigned_pads = 0
+            unmatched = []
+            for fp in board.GetFootprints():
+                ref = fp.GetReference()
+                for pad in fp.Pads():
+                    pad_num = pad.GetNumber()
+                    key = (ref, str(pad_num))
+                    if key in pad_net_map:
+                        net_name = pad_net_map[key]
+                        if nets_by_name.has_key(net_name):
+                            pad.SetNet(nets_by_name[net_name])
+                            assigned_pads += 1
+                    else:
+                        unmatched.append(f"{ref}/{pad_num}")
+
+            board.Save(board_path)
+
+            # If board was loaded fresh, update internal reference
+            if params.get("boardPath"):
+                self.board = board
+                self._update_command_handlers()
+
+            logger.info(f"sync_schematic_to_board: {len(added_nets)} nets added, {assigned_pads} pads assigned")
+            return {
+                "success": True,
+                "message": f"PCB nets synced from schematic: {len(added_nets)} nets added, {assigned_pads} pads assigned",
+                "nets_added": added_nets,
+                "nets_total": len(net_names),
+                "pads_assigned": assigned_pads,
+                "unmatched_pads_sample": unmatched[:10],
+            }
+
+        except Exception as e:
+            logger.error(f"Error in sync_schematic_to_board: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {"success": False, "message": str(e)}
+
+    def _handle_import_svg_logo(self, params):
+        """Import an SVG file as PCB graphic polygons on the silkscreen"""
+        logger.info("Importing SVG logo into PCB")
+        try:
+            from commands.svg_import import import_svg_to_pcb
+
+            pcb_path = params.get("pcbPath")
+            svg_path = params.get("svgPath")
+            x = float(params.get("x", 0))
+            y = float(params.get("y", 0))
+            width = float(params.get("width", 10))
+            layer = params.get("layer", "F.SilkS")
+            stroke_width = float(params.get("strokeWidth", 0))
+            filled = bool(params.get("filled", True))
+
+            if not pcb_path or not svg_path:
+                return {"success": False, "message": "Missing required parameters: pcbPath, svgPath"}
+
+            result = import_svg_to_pcb(pcb_path, svg_path, x, y, width, layer, stroke_width, filled)
+
+            # import_svg_to_pcb writes gr_poly entries directly to the .kicad_pcb file,
+            # bypassing the pcbnew in-memory board object.  Any subsequent board.Save()
+            # call would overwrite the file with the stale in-memory state, erasing the
+            # logo.  Reload the board from disk so pcbnew's memory matches the file.
+            if result.get("success") and self.board:
+                try:
+                    self.board = pcbnew.LoadBoard(pcb_path)
+                    # Propagate updated board reference to all command handlers
+                    self._update_command_handlers()
+                    logger.info("Reloaded board into pcbnew after SVG logo import")
+                except Exception as reload_err:
+                    logger.warning(f"Board reload after SVG import failed (non-fatal): {reload_err}")
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Error importing SVG logo: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {"success": False, "message": str(e)}
+
+    def _handle_snapshot_project(self, params):
+        """Copy the entire project folder to a snapshot directory for checkpoint/resume."""
+        import shutil
+        from datetime import datetime
+        from pathlib import Path
+        try:
+            step   = params.get("step", "")
+            label  = params.get("label", "")
+            prompt_text = params.get("prompt", "")
+            # Determine project directory from loaded board or explicit path
+            project_dir = None
+            if self.board:
+                board_file = self.board.GetFileName()
+                if board_file:
+                    project_dir = str(Path(board_file).parent)
+            if not project_dir:
+                project_dir = params.get("projectPath")
+            if not project_dir or not os.path.isdir(project_dir):
+                return {"success": False, "message": "Could not determine project directory for snapshot"}
+
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            # Save prompt + log into logs/ subdirectory before snapshotting
+            logs_dir = Path(project_dir) / "logs"
+            logs_dir.mkdir(exist_ok=True)
+
+            prompt_file = None
+            if prompt_text:
+                prompt_filename = f"PROMPT_step{step}_{ts}.md" if step else f"PROMPT_{ts}.md"
+                prompt_file = logs_dir / prompt_filename
+                prompt_file.write_text(prompt_text, encoding="utf-8")
+                logger.info(f"Prompt saved: {prompt_file}")
+
+            # Copy current MCP session log into logs/ before snapshotting
+            import platform
+            system = platform.system()
+            if system == "Windows":
+                mcp_log_dir = os.path.join(os.environ.get("APPDATA", ""), "Claude", "logs")
+            elif system == "Darwin":
+                mcp_log_dir = os.path.expanduser("~/Library/Logs/Claude")
+            else:
+                mcp_log_dir = os.path.expanduser("~/.config/Claude/logs")
+            mcp_log_src = os.path.join(mcp_log_dir, "mcp-server-kicad.log")
+            mcp_log_dest = None
+            if os.path.exists(mcp_log_src):
+                with open(mcp_log_src, "r", encoding="utf-8", errors="replace") as f:
+                    all_lines = f.readlines()
+                session_start = 0
+                for i, line in enumerate(all_lines):
+                    if "Initializing server" in line:
+                        session_start = i
+                session_lines = all_lines[session_start:]
+                log_filename = f"mcp_log_step{step}_{ts}.txt" if step else f"mcp_log_{ts}.txt"
+                mcp_log_dest = logs_dir / log_filename
+                with open(mcp_log_dest, "w", encoding="utf-8") as f:
+                    f.writelines(session_lines)
+                logger.info(f"MCP session log saved: {mcp_log_dest} ({len(session_lines)} lines)")
+
+            base_name = Path(project_dir).name
+            suffix_parts = [p for p in [f"step{step}" if step else "", label, ts] if p]
+            snapshot_name = base_name + "_snapshot_" + "_".join(suffix_parts)
+            snapshots_base = Path(project_dir) / "snapshots"
+            snapshots_base.mkdir(exist_ok=True)
+            snapshot_dir = str(snapshots_base / snapshot_name)
+
+            shutil.copytree(project_dir, snapshot_dir, ignore=shutil.ignore_patterns("snapshots"))
+            logger.info(f"Project snapshot saved: {snapshot_dir}")
+            return {
+                "success": True,
+                "message": f"Snapshot saved: {snapshot_name}",
+                "snapshotPath": snapshot_dir,
+                "sourceDir": project_dir,
+                "promptSaved": str(prompt_file) if prompt_file else None,
+                "mcpLogSaved": str(mcp_log_dest) if mcp_log_dest else None,
+            }
+        except Exception as e:
+            logger.error(f"snapshot_project error: {e}")
             return {"success": False, "message": str(e)}
 
     def _handle_check_kicad_ui(self, params):
@@ -927,8 +1810,16 @@ class KiCADInterface:
             return {"success": False, "message": str(e)}
 
     def _handle_refill_zones(self, params):
-        """Refill all copper pour zones on the board"""
-        logger.info("Refilling zones")
+        """Refill all copper pour zones on the board.
+
+        pcbnew.ZONE_FILLER.Fill() can cause a C++ access violation (0xC0000005)
+        that crashes the entire Python process when called from SWIG outside KiCAD UI.
+        To avoid killing the main process we run the fill in an isolated subprocess.
+        If the subprocess crashes or times out, we return a non-fatal warning so the
+        caller can continue — KiCAD Pcbnew will refill zones automatically when the
+        board is opened (press B).
+        """
+        logger.info("Refilling zones (subprocess isolation)")
         try:
             if not self.board:
                 return {
@@ -937,18 +1828,55 @@ class KiCADInterface:
                     "errorDetails": "Load or create a board first",
                 }
 
-            # Use pcbnew's zone filler for SWIG backend
-            filler = pcbnew.ZONE_FILLER(self.board)
-            zones = self.board.Zones()
-            filler.Fill(zones)
+            # First save the board so the subprocess can load it fresh
+            board_path = self.board.GetFileName()
+            if not board_path:
+                return {"success": False, "message": "Board has no file path — save first"}
+            self.board.Save(board_path)
 
-            return {
-                "success": True,
-                "message": "Zones refilled successfully",
-                "zoneCount": zones.size()
-                if hasattr(zones, "size")
-                else len(list(zones)),
-            }
+            zone_count = self.board.GetAreaCount() if hasattr(self.board, "GetAreaCount") else 0
+
+            # Run pcbnew zone fill in an isolated subprocess to prevent crashes
+            import subprocess, sys, textwrap
+            script = textwrap.dedent(f"""
+import pcbnew, sys
+board = pcbnew.LoadBoard({repr(board_path)})
+filler = pcbnew.ZONE_FILLER(board)
+filler.Fill(board.Zones())
+board.Save({repr(board_path)})
+print("ok")
+""")
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-c", script],
+                    capture_output=True, text=True, timeout=60
+                )
+                if result.returncode == 0 and "ok" in result.stdout:
+                    # Reload board after subprocess modified it
+                    self.board = pcbnew.LoadBoard(board_path)
+                    self._update_command_handlers()
+                    logger.info("Zone fill subprocess succeeded")
+                    return {
+                        "success": True,
+                        "message": f"Zones refilled successfully ({zone_count} zones)",
+                        "zoneCount": zone_count,
+                    }
+                else:
+                    logger.warning(f"Zone fill subprocess failed: rc={result.returncode} stderr={result.stderr[:200]}")
+                    return {
+                        "success": False,
+                        "message": "Zone fill failed in subprocess — zones are defined and will fill when opened in KiCAD (press B). Continuing is safe.",
+                        "zoneCount": zone_count,
+                        "details": result.stderr[:300] if result.stderr else result.stdout[:300],
+                    }
+            except subprocess.TimeoutExpired:
+                logger.warning("Zone fill subprocess timed out after 60s")
+                return {
+                    "success": False,
+                    "message": "Zone fill timed out — zones are defined and will fill when opened in KiCAD (press B). Continuing is safe.",
+                    "zoneCount": zone_count,
+                }
+
         except Exception as e:
             logger.error(f"Error refilling zones: {str(e)}")
             return {"success": False, "message": str(e)}
@@ -994,9 +1922,11 @@ class KiCADInterface:
 
             return {
                 "success": success,
-                "message": "Added trace (visible in KiCAD UI)"
-                if success
-                else "Failed to add trace",
+                "message": (
+                    "Added trace (visible in KiCAD UI)"
+                    if success
+                    else "Failed to add trace"
+                ),
                 "trace": {
                     "start": {"x": start_x, "y": start_y, "unit": "mm"},
                     "end": {"x": end_x, "y": end_y, "unit": "mm"},
@@ -1036,9 +1966,11 @@ class KiCADInterface:
 
             return {
                 "success": success,
-                "message": "Added via (visible in KiCAD UI)"
-                if success
-                else "Failed to add via",
+                "message": (
+                    "Added via (visible in KiCAD UI)"
+                    if success
+                    else "Failed to add via"
+                ),
                 "via": {
                     "position": {"x": x, "y": y, "unit": "mm"},
                     "size": size,
@@ -1102,9 +2034,11 @@ class KiCADInterface:
 
             return {
                 "success": success,
-                "message": "Added copper pour (visible in KiCAD UI)"
-                if success
-                else "Failed to add copper pour",
+                "message": (
+                    "Added copper pour (visible in KiCAD UI)"
+                    if success
+                    else "Failed to add copper pour"
+                ),
                 "pour": {
                     "layer": layer,
                     "net": net,
@@ -1126,9 +2060,11 @@ class KiCADInterface:
 
             return {
                 "success": success,
-                "message": "Zones refilled (visible in KiCAD UI)"
-                if success
-                else "Failed to refill zones",
+                "message": (
+                    "Zones refilled (visible in KiCAD UI)"
+                    if success
+                    else "Failed to refill zones"
+                ),
             }
         except Exception as e:
             logger.error(f"IPC refill_zones error: {e}")
@@ -1159,9 +2095,11 @@ class KiCADInterface:
 
             return {
                 "success": success,
-                "message": f"Added text '{text}' (visible in KiCAD UI)"
-                if success
-                else "Failed to add text",
+                "message": (
+                    f"Added text '{text}' (visible in KiCAD UI)"
+                    if success
+                    else "Failed to add text"
+                ),
             }
         except Exception as e:
             logger.error(f"IPC add_text error: {e}")
@@ -1178,9 +2116,11 @@ class KiCADInterface:
 
             return {
                 "success": success,
-                "message": f"Board size set to {width}x{height} {unit} (visible in KiCAD UI)"
-                if success
-                else "Failed to set board size",
+                "message": (
+                    f"Board size set to {width}x{height} {unit} (visible in KiCAD UI)"
+                    if success
+                    else "Failed to set board size"
+                ),
                 "boardSize": {"width": width, "height": height, "unit": unit},
             }
         except Exception as e:
@@ -1244,9 +2184,11 @@ class KiCADInterface:
 
             return {
                 "success": success,
-                "message": f"Placed component {reference} (visible in KiCAD UI)"
-                if success
-                else "Failed to place component",
+                "message": (
+                    f"Placed component {reference} (visible in KiCAD UI)"
+                    if success
+                    else "Failed to place component"
+                ),
                 "component": {
                     "reference": reference,
                     "footprint": footprint,
@@ -1282,9 +2224,11 @@ class KiCADInterface:
 
             return {
                 "success": success,
-                "message": f"Moved component {reference} (visible in KiCAD UI)"
-                if success
-                else "Failed to move component",
+                "message": (
+                    f"Moved component {reference} (visible in KiCAD UI)"
+                    if success
+                    else "Failed to move component"
+                ),
             }
         except Exception as e:
             logger.error(f"IPC move_component error: {e}")
@@ -1299,9 +2243,11 @@ class KiCADInterface:
 
             return {
                 "success": success,
-                "message": f"Deleted component {reference} (visible in KiCAD UI)"
-                if success
-                else "Failed to delete component",
+                "message": (
+                    f"Deleted component {reference} (visible in KiCAD UI)"
+                    if success
+                    else "Failed to delete component"
+                ),
             }
         except Exception as e:
             logger.error(f"IPC delete_component error: {e}")
@@ -1350,7 +2296,19 @@ class KiCADInterface:
             return {"success": False, "message": str(e)}
 
     def _ipc_add_board_outline(self, params):
-        """IPC handler for add_board_outline - adds board edge with real-time UI update"""
+        """IPC handler for add_board_outline - adds board edge with real-time UI update.
+        Rounded rectangles are delegated to the SWIG path because the IPC BoardSegment
+        type cannot represent arcs; the SWIG path writes directly to the .kicad_pcb file
+        and correctly generates PCB_SHAPE arcs for rounded corners.
+        """
+        shape = params.get("shape", "rectangle")
+        if shape in ("rounded_rectangle", "rectangle"):
+            # IPC path only supports straight segments from a points list,
+            # but Claude sends rectangle/rounded_rectangle as shape+width+height.
+            # Fall back to the SWIG path which correctly handles both shapes.
+            logger.info(f"_ipc_add_board_outline: delegating {shape} to SWIG path")
+            return self.board_commands.add_board_outline(params)
+
         try:
             from kipy.board_types import BoardSegment
             from kipy.geometry import Vector2
@@ -1359,8 +2317,10 @@ class KiCADInterface:
 
             board = self.ipc_board_api._get_board()
 
-            points = params.get("points", [])
-            width = params.get("width", 0.1)
+            # Unwrap nested params (Claude sends {"shape":..., "params":{...}})
+            inner = params.get("params", params)
+            points = inner.get("points", params.get("points", []))
+            width = inner.get("width", params.get("width", 0.1))
 
             if len(points) < 2:
                 return {
@@ -1476,9 +2436,11 @@ class KiCADInterface:
 
             return {
                 "success": success,
-                "message": f"Rotated component {reference} by {angle}° (visible in KiCAD UI)"
-                if success
-                else "Failed to rotate component",
+                "message": (
+                    f"Rotated component {reference} by {angle}° (visible in KiCAD UI)"
+                    if success
+                    else "Failed to rotate component"
+                ),
                 "newRotation": new_rotation,
             }
         except Exception as e:
@@ -1515,13 +2477,15 @@ class KiCADInterface:
             "success": True,
             "backend": "ipc" if self.use_ipc else "swig",
             "realtime_sync": self.use_ipc,
-            "ipc_connected": self.ipc_backend.is_connected()
-            if self.ipc_backend
-            else False,
+            "ipc_connected": (
+                self.ipc_backend.is_connected() if self.ipc_backend else False
+            ),
             "version": self.ipc_backend.get_version() if self.ipc_backend else "N/A",
-            "message": "Using IPC backend with real-time UI sync"
-            if self.use_ipc
-            else "Using SWIG backend (requires manual reload)",
+            "message": (
+                "Using IPC backend with real-time UI sync"
+                if self.use_ipc
+                else "Using SWIG backend (requires manual reload)"
+            ),
         }
 
     def _handle_ipc_add_track(self, params):
@@ -1541,9 +2505,11 @@ class KiCADInterface:
             )
             return {
                 "success": success,
-                "message": "Track added (visible in KiCAD UI)"
-                if success
-                else "Failed to add track",
+                "message": (
+                    "Track added (visible in KiCAD UI)"
+                    if success
+                    else "Failed to add track"
+                ),
                 "realtime": True,
             }
         except Exception as e:
@@ -1566,9 +2532,11 @@ class KiCADInterface:
             )
             return {
                 "success": success,
-                "message": "Via added (visible in KiCAD UI)"
-                if success
-                else "Failed to add via",
+                "message": (
+                    "Via added (visible in KiCAD UI)"
+                    if success
+                    else "Failed to add via"
+                ),
                 "realtime": True,
             }
         except Exception as e:
@@ -1591,9 +2559,11 @@ class KiCADInterface:
             )
             return {
                 "success": success,
-                "message": "Text added (visible in KiCAD UI)"
-                if success
-                else "Failed to add text",
+                "message": (
+                    "Text added (visible in KiCAD UI)"
+                    if success
+                    else "Failed to add text"
+                ),
                 "realtime": True,
             }
         except Exception as e:
@@ -1654,10 +2624,9 @@ class KiCADInterface:
     # JLCPCB API handlers
 
     def _handle_download_jlcpcb_database(self, params):
-        """Download JLCPCB parts database from official API or JLCSearch fallback"""
+        """Download JLCPCB parts database from JLCSearch API"""
         try:
             force = params.get("force", False)
-            source = params.get("source", "auto")
 
             # Check if database exists
             import os
@@ -1670,58 +2639,18 @@ class KiCADInterface:
                     "stats": stats,
                 }
 
-            has_official_creds = all(
-                [
-                    os.getenv("JLCPCB_APP_ID"),
-                    os.getenv("JLCPCB_API_KEY"),
-                    os.getenv("JLCPCB_API_SECRET"),
-                ]
+            logger.info("Downloading JLCPCB parts database from JLCSearch...")
+
+            # Download parts from JLCSearch public API (no auth required)
+            parts = self.jlcsearch_client.download_all_components(
+                callback=lambda total, msg: logger.info(f"{msg}")
             )
 
-            selected_source = source
-            if source == "auto":
-                selected_source = "official" if has_official_creds else "jlcsearch"
-
-            if selected_source == "official" and not has_official_creds:
-                return {
-                    "success": False,
-                    "message": (
-                        "Official JLCPCB source requested but credentials are incomplete. "
-                        "Set JLCPCB_APP_ID, JLCPCB_API_KEY, and JLCPCB_API_SECRET."
-                    ),
-                }
-
-            warning = None
-            if selected_source == "official":
-                logger.info(
-                    "Downloading JLCPCB parts database from official JLCPCB API..."
-                )
-                parts = self.jlcpcb_client.download_full_database(
-                    callback=lambda page, total, msg: logger.info(
-                        f"[page {page}] {msg}"
-                    )
-                )
-                logger.info(
-                    f"Importing {len(parts)} official API parts into database..."
-                )
-                self.jlcpcb_parts.import_parts(
-                    parts, progress_callback=lambda curr, total, msg: logger.info(msg)
-                )
-            else:
-                logger.info(
-                    "Downloading JLCPCB parts database from JLCSearch fallback source..."
-                )
-                parts = self.jlcsearch_client.download_all_components(
-                    callback=lambda total, msg: logger.info(msg)
-                )
-                logger.info(f"Importing {len(parts)} JLCSearch parts into database...")
-                self.jlcpcb_parts.import_jlcsearch_parts(
-                    parts, progress_callback=lambda curr, total, msg: logger.info(msg)
-                )
-                warning = (
-                    "Using JLCSearch fallback source. Result size depends on public endpoint limits. "
-                    "For full catalog download, configure official JLCPCB credentials."
-                )
+            # Import into database
+            logger.info(f"Importing {len(parts)} parts into database...")
+            self.jlcpcb_parts.import_jlcsearch_parts(
+                parts, progress_callback=lambda curr, total, msg: logger.info(msg)
+            )
 
             # Get final stats
             stats = self.jlcpcb_parts.get_database_stats()
@@ -1736,8 +2665,6 @@ class KiCADInterface:
                 "extended_parts": stats["extended_parts"],
                 "db_size_mb": round(db_size_mb, 2),
                 "db_path": stats["db_path"],
-                "source": selected_source,
-                "warning": warning,
             }
 
         except Exception as e:
@@ -1859,6 +2786,49 @@ class KiCADInterface:
             return {
                 "success": False,
                 "message": f"Failed to suggest alternatives: {str(e)}",
+            }
+
+    def _handle_enrich_datasheets(self, params):
+        """Enrich schematic Datasheet fields from LCSC numbers"""
+        try:
+            from pathlib import Path
+
+            schematic_path = params.get("schematic_path")
+            if not schematic_path:
+                return {"success": False, "message": "Missing schematic_path parameter"}
+            dry_run = params.get("dry_run", False)
+            manager = DatasheetManager()
+            return manager.enrich_schematic(Path(schematic_path), dry_run=dry_run)
+        except Exception as e:
+            logger.error(f"Error enriching datasheets: {e}", exc_info=True)
+            return {
+                "success": False,
+                "message": f"Failed to enrich datasheets: {str(e)}",
+            }
+
+    def _handle_get_datasheet_url(self, params):
+        """Return LCSC datasheet and product URLs for a part number"""
+        try:
+            lcsc = params.get("lcsc", "")
+            if not lcsc:
+                return {"success": False, "message": "Missing lcsc parameter"}
+            manager = DatasheetManager()
+            datasheet_url = manager.get_datasheet_url(lcsc)
+            product_url = manager.get_product_url(lcsc)
+            if not datasheet_url:
+                return {"success": False, "message": f"Invalid LCSC number: {lcsc}"}
+            norm = manager._normalize_lcsc(lcsc)
+            return {
+                "success": True,
+                "lcsc": norm,
+                "datasheet_url": datasheet_url,
+                "product_url": product_url,
+            }
+        except Exception as e:
+            logger.error(f"Error getting datasheet URL: {e}", exc_info=True)
+            return {
+                "success": False,
+                "message": f"Failed to get datasheet URL: {str(e)}",
             }
 
 

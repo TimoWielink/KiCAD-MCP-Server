@@ -192,9 +192,12 @@ class JLCSearchClient:
         """
         Download all components from jlcsearch database
 
+        Note: tscircuit API has a hard-coded 100 result limit per request.
+        Full catalog download requires ~25,000 paginated requests (~40-60 minutes).
+
         Args:
             callback: Optional progress callback function(parts_count, status_msg)
-            batch_size: Number of parts per batch
+            batch_size: Number of parts per batch (max 100 due to API limit)
 
         Returns:
             List of all parts

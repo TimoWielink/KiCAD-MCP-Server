@@ -7,8 +7,11 @@ import pcbnew
 import logging
 from typing import Dict, Any, Optional, List, Tuple
 import base64
+import shutil
+from datetime import datetime
 
-logger = logging.getLogger('kicad_interface')
+logger = logging.getLogger("kicad_interface")
+
 
 class ExportCommands:
     """Handles export-related KiCAD operations"""
@@ -24,7 +27,7 @@ class ExportCommands:
                 return {
                     "success": False,
                     "message": "No board is loaded",
-                    "errorDetails": "Load or create a board first"
+                    "errorDetails": "Load or create a board first",
                 }
 
             output_dir = params.get("outputDir")
@@ -38,7 +41,7 @@ class ExportCommands:
                 return {
                     "success": False,
                     "message": "Missing output directory",
-                    "errorDetails": "outputDir parameter is required"
+                    "errorDetails": "outputDir parameter is required",
                 }
 
             # Create output directory if it doesn't exist
@@ -47,7 +50,7 @@ class ExportCommands:
 
             # Create plot controller
             plotter = pcbnew.PLOT_CONTROLLER(self.board)
-            
+
             # Set up plot options
             plot_opts = plotter.GetPlotOptions()
             plot_opts.SetOutputDirectory(output_dir)
@@ -84,30 +87,49 @@ class ExportCommands:
 
                 if kicad_cli and board_file and os.path.exists(board_file):
                     import subprocess
+
                     # Generate drill files using kicad-cli
                     cmd = [
                         kicad_cli,
-                        'pcb', 'export', 'drill',
-                        '--output', output_dir,
-                        '--format', 'excellon',
-                        '--drill-origin', 'absolute',
-                        '--excellon-separate-th',  # Separate plated/non-plated
-                        board_file
+                        "pcb",
+                        "export",
+                        "drill",
+                        "--output",
+                        output_dir,
+                        "--format",
+                        "excellon",
+                        "--drill-origin",
+                        "absolute",
+                        "--excellon-separate-th",  # Separate plated/non-plated
+                        board_file,
                     ]
 
                     try:
-                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                        result = subprocess.run(
+                            cmd, capture_output=True, text=True, timeout=60
+                        )
                         if result.returncode == 0:
                             # Get list of generated drill files
                             for file in os.listdir(output_dir):
                                 if file.endswith((".drl", ".cnc")):
                                     drill_files.append(file)
                         else:
-                            logger.warning(f"Drill file generation failed: {result.stderr}")
+                            logger.warning(
+                                f"Drill file generation failed: {result.stderr}"
+                            )
                     except Exception as drill_error:
-                        logger.warning(f"Could not generate drill files: {str(drill_error)}")
+                        logger.warning(
+                            f"Could not generate drill files: {str(drill_error)}"
+                        )
                 else:
                     logger.warning("kicad-cli not available for drill file generation")
+
+            # DEV MODE: copy MCP server log into project folder for later analysis
+            if os.environ.get("KICAD_MCP_DEV") == "1":
+                try:
+                    self._dev_copy_mcp_log(output_dir)
+                except Exception as dev_err:
+                    logger.warning(f"[DEV] Could not copy MCP log: {dev_err}")
 
             return {
                 "success": True,
@@ -115,9 +137,9 @@ class ExportCommands:
                 "files": {
                     "gerber": plotted_layers,
                     "drill": drill_files,
-                    "map": ["job.gbrjob"] if generate_map_file else []
+                    "map": ["job.gbrjob"] if generate_map_file else [],
                 },
-                "outputDir": output_dir
+                "outputDir": output_dir,
             }
 
         except Exception as e:
@@ -125,7 +147,7 @@ class ExportCommands:
             return {
                 "success": False,
                 "message": "Failed to export Gerber files",
-                "errorDetails": str(e)
+                "errorDetails": str(e),
             }
 
     def export_pdf(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -135,7 +157,7 @@ class ExportCommands:
                 return {
                     "success": False,
                     "message": "No board is loaded",
-                    "errorDetails": "Load or create a board first"
+                    "errorDetails": "Load or create a board first",
                 }
 
             output_path = params.get("outputPath")
@@ -148,7 +170,7 @@ class ExportCommands:
                 return {
                     "success": False,
                     "message": "Missing output path",
-                    "errorDetails": "outputPath parameter is required"
+                    "errorDetails": "outputPath parameter is required",
                 }
 
             # Create output directory if it doesn't exist
@@ -180,13 +202,15 @@ class ExportCommands:
                 plot_opts.SetAutoScale(True)
                 # Note: KiCAD 9.0 doesn't support explicit page size selection
                 # for formats other than A4. The PDF will auto-scale to fit.
-                logger.warning(f"Page size '{page_size}' requested, but KiCAD 9.0 only supports A4 explicitly. Using auto-scale instead.")
+                logger.warning(
+                    f"Page size '{page_size}' requested, but KiCAD 9.0 only supports A4 explicitly. Using auto-scale instead."
+                )
 
             # Open plot for writing
             # Note: For PDF, all layers are combined into a single file
             # KiCAD prepends the board filename to the plot file name
-            base_name = os.path.basename(output_path).replace('.pdf', '')
-            plotter.OpenPlotfile(base_name, pcbnew.PLOT_FORMAT_PDF, '')
+            base_name = os.path.basename(output_path).replace(".pdf", "")
+            plotter.OpenPlotfile(base_name, pcbnew.PLOT_FORMAT_PDF, "")
 
             # Plot specified layers or all enabled layers
             plotted_layers = []
@@ -212,7 +236,9 @@ class ExportCommands:
             # Get the actual output filename that was created
             board_name = os.path.splitext(os.path.basename(self.board.GetFileName()))[0]
             actual_filename = f"{board_name}-{base_name}.pdf"
-            actual_output_path = os.path.join(os.path.dirname(output_path), actual_filename)
+            actual_output_path = os.path.join(
+                os.path.dirname(output_path), actual_filename
+            )
 
             return {
                 "success": True,
@@ -221,8 +247,8 @@ class ExportCommands:
                     "path": actual_output_path,
                     "requestedPath": output_path,
                     "layers": plotted_layers,
-                    "pageSize": page_size if page_size == "A4" else "auto-scaled"
-                }
+                    "pageSize": page_size if page_size == "A4" else "auto-scaled",
+                },
             }
 
         except Exception as e:
@@ -230,7 +256,7 @@ class ExportCommands:
             return {
                 "success": False,
                 "message": "Failed to export PDF file",
-                "errorDetails": str(e)
+                "errorDetails": str(e),
             }
 
     def export_svg(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -240,7 +266,7 @@ class ExportCommands:
                 return {
                     "success": False,
                     "message": "No board is loaded",
-                    "errorDetails": "Load or create a board first"
+                    "errorDetails": "Load or create a board first",
                 }
 
             output_path = params.get("outputPath")
@@ -252,7 +278,7 @@ class ExportCommands:
                 return {
                     "success": False,
                     "message": "Missing output path",
-                    "errorDetails": "outputPath parameter is required"
+                    "errorDetails": "outputPath parameter is required",
                 }
 
             # Create output directory if it doesn't exist
@@ -261,7 +287,7 @@ class ExportCommands:
 
             # Create plot controller
             plotter = pcbnew.PLOT_CONTROLLER(self.board)
-            
+
             # Set up plot options
             plot_opts = plotter.GetPlotOptions()
             plot_opts.SetOutputDirectory(os.path.dirname(output_path))
@@ -300,10 +326,7 @@ class ExportCommands:
             return {
                 "success": True,
                 "message": "Exported SVG file",
-                "file": {
-                    "path": output_path,
-                    "layers": plotted_layers
-                }
+                "file": {"path": output_path, "layers": plotted_layers},
             }
 
         except Exception as e:
@@ -311,7 +334,7 @@ class ExportCommands:
             return {
                 "success": False,
                 "message": "Failed to export SVG file",
-                "errorDetails": str(e)
+                "errorDetails": str(e),
             }
 
     def export_3d(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -325,7 +348,7 @@ class ExportCommands:
                 return {
                     "success": False,
                     "message": "No board is loaded",
-                    "errorDetails": "Load or create a board first"
+                    "errorDetails": "Load or create a board first",
                 }
 
             output_path = params.get("outputPath")
@@ -339,7 +362,7 @@ class ExportCommands:
                 return {
                     "success": False,
                     "message": "Missing output path",
-                    "errorDetails": "outputPath parameter is required"
+                    "errorDetails": "outputPath parameter is required",
                 }
 
             # Get board file path
@@ -348,7 +371,7 @@ class ExportCommands:
                 return {
                     "success": False,
                     "message": "Board file not found",
-                    "errorDetails": "Board must be saved before exporting 3D models"
+                    "errorDetails": "Board must be saved before exporting 3D models",
                 }
 
             # Create output directory if it doesn't exist
@@ -361,7 +384,7 @@ class ExportCommands:
                 return {
                     "success": False,
                     "message": "kicad-cli not found",
-                    "errorDetails": "KiCAD CLI tool not found. Install KiCAD 8.0+ or set PATH."
+                    "errorDetails": "KiCAD CLI tool not found. Install KiCAD 8.0+ or set PATH.",
                 }
 
             # Build command based on format
@@ -370,30 +393,39 @@ class ExportCommands:
             if format_upper == "STEP":
                 cmd = [
                     kicad_cli,
-                    'pcb', 'export', 'step',
-                    '--output', output_path,
-                    '--force'  # Overwrite existing file
+                    "pcb",
+                    "export",
+                    "step",
+                    "--output",
+                    output_path,
+                    "--force",  # Overwrite existing file
                 ]
 
                 # Add options based on parameters
                 if not include_components:
-                    cmd.append('--no-components')
+                    cmd.append("--no-components")
                 if include_copper:
-                    cmd.extend(['--include-tracks', '--include-pads', '--include-zones'])
+                    cmd.extend(
+                        ["--include-tracks", "--include-pads", "--include-zones"]
+                    )
                 if include_silkscreen:
-                    cmd.append('--include-silkscreen')
+                    cmd.append("--include-silkscreen")
                 if include_solder_mask:
-                    cmd.append('--include-soldermask')
+                    cmd.append("--include-soldermask")
 
                 cmd.append(board_file)
 
             elif format_upper == "VRML":
                 cmd = [
                     kicad_cli,
-                    'pcb', 'export', 'vrml',
-                    '--output', output_path,
-                    '--units', 'mm',  # Use mm for consistency
-                    '--force'
+                    "pcb",
+                    "export",
+                    "vrml",
+                    "--output",
+                    output_path,
+                    "--units",
+                    "mm",  # Use mm for consistency
+                    "--force",
                 ]
 
                 if not include_components:
@@ -407,7 +439,7 @@ class ExportCommands:
                 return {
                     "success": False,
                     "message": "Unsupported format",
-                    "errorDetails": f"Format {format} is not supported. Use 'STEP' or 'VRML'."
+                    "errorDetails": f"Format {format} is not supported. Use 'STEP' or 'VRML'.",
                 }
 
             # Execute kicad-cli command
@@ -417,7 +449,7 @@ class ExportCommands:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=300  # 5 minute timeout for 3D export
+                timeout=300,  # 5 minute timeout for 3D export
             )
 
             if result.returncode != 0:
@@ -425,16 +457,13 @@ class ExportCommands:
                 return {
                     "success": False,
                     "message": "3D export command failed",
-                    "errorDetails": result.stderr
+                    "errorDetails": result.stderr,
                 }
 
             return {
                 "success": True,
                 "message": f"Exported {format_upper} file",
-                "file": {
-                    "path": output_path,
-                    "format": format_upper
-                }
+                "file": {"path": output_path, "format": format_upper},
             }
 
         except subprocess.TimeoutExpired:
@@ -442,14 +471,14 @@ class ExportCommands:
             return {
                 "success": False,
                 "message": "3D export timed out",
-                "errorDetails": "Export took longer than 5 minutes"
+                "errorDetails": "Export took longer than 5 minutes",
             }
         except Exception as e:
             logger.error(f"Error exporting 3D model: {str(e)}")
             return {
                 "success": False,
                 "message": "Failed to export 3D model",
-                "errorDetails": str(e)
+                "errorDetails": str(e),
             }
 
     def export_bom(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -459,7 +488,7 @@ class ExportCommands:
                 return {
                     "success": False,
                     "message": "No board is loaded",
-                    "errorDetails": "Load or create a board first"
+                    "errorDetails": "Load or create a board first",
                 }
 
             output_path = params.get("outputPath")
@@ -471,7 +500,7 @@ class ExportCommands:
                 return {
                     "success": False,
                     "message": "Missing output path",
-                    "errorDetails": "outputPath parameter is required"
+                    "errorDetails": "outputPath parameter is required",
                 }
 
             # Create output directory if it doesn't exist
@@ -484,8 +513,8 @@ class ExportCommands:
                 component = {
                     "reference": module.GetReference(),
                     "value": module.GetValue(),
-                    "footprint": str(module.GetFPID()),
-                    "layer": self.board.GetLayerName(module.GetLayer())
+                    "footprint": module.GetFPID().GetUniStringLibId(),
+                    "layer": self.board.GetLayerName(module.GetLayer()),
                 }
 
                 # Add requested attributes
@@ -505,7 +534,7 @@ class ExportCommands:
                             "value": comp["value"],
                             "footprint": comp["footprint"],
                             "quantity": 1,
-                            "references": [comp["reference"]]
+                            "references": [comp["reference"]],
                         }
                     else:
                         grouped[key]["quantity"] += 1
@@ -525,7 +554,7 @@ class ExportCommands:
                 return {
                     "success": False,
                     "message": "Unsupported format",
-                    "errorDetails": f"Format {format} is not supported"
+                    "errorDetails": f"Format {format} is not supported",
                 }
 
             return {
@@ -534,8 +563,8 @@ class ExportCommands:
                 "file": {
                     "path": output_path,
                     "format": format,
-                    "componentCount": len(components)
-                }
+                    "componentCount": len(components),
+                },
             }
 
         except Exception as e:
@@ -543,13 +572,14 @@ class ExportCommands:
             return {
                 "success": False,
                 "message": "Failed to export BOM",
-                "errorDetails": str(e)
+                "errorDetails": str(e),
             }
 
     def _export_bom_csv(self, path: str, components: List[Dict[str, Any]]) -> None:
         """Export BOM to CSV format"""
         import csv
-        with open(path, 'w', newline='') as f:
+
+        with open(path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=components[0].keys())
             writer.writeheader()
             writer.writerows(components)
@@ -557,6 +587,7 @@ class ExportCommands:
     def _export_bom_xml(self, path: str, components: List[Dict[str, Any]]) -> None:
         """Export BOM to XML format"""
         import xml.etree.ElementTree as ET
+
         root = ET.Element("bom")
         for comp in components:
             comp_elem = ET.SubElement(root, "component")
@@ -564,7 +595,7 @@ class ExportCommands:
                 elem = ET.SubElement(comp_elem, key)
                 elem.text = str(value)
         tree = ET.ElementTree(root)
-        tree.write(path, encoding='utf-8', xml_declaration=True)
+        tree.write(path, encoding="utf-8", xml_declaration=True)
 
     def _export_bom_html(self, path: str, components: List[Dict[str, Any]]) -> None:
         """Export BOM to HTML format"""
@@ -581,13 +612,14 @@ class ExportCommands:
                 html.append(f"<td>{value}</td>")
             html.append("</tr>")
         html.append("</table></body></html>")
-        with open(path, 'w') as f:
+        with open(path, "w") as f:
             f.write("\n".join(html))
 
     def _export_bom_json(self, path: str, components: List[Dict[str, Any]]) -> None:
         """Export BOM to JSON format"""
         import json
-        with open(path, 'w') as f:
+
+        with open(path, "w") as f:
             json.dump({"components": components}, f, indent=2)
 
     def _find_kicad_cli(self) -> Optional[str]:
@@ -630,3 +662,54 @@ class ExportCommands:
                 return path
 
         return None
+
+    def _dev_copy_mcp_log(self, output_dir: str) -> None:
+        """DEV MODE: Copy the MCP server log for the current session into the project folder.
+
+        Activated by env var KICAD_MCP_DEV=1.
+        The log is placed alongside the Gerber output as:
+            <project_dir>/mcp_log_<YYYYMMDD_HHMMSS>.txt
+
+        Only lines from the current server session (today's date) are included
+        to keep the file focused on the relevant run.
+        """
+        import platform
+
+        # Resolve Claude log path per platform
+        system = platform.system()
+        if system == "Windows":
+            log_dir = os.path.join(os.environ.get("APPDATA", ""), "Claude", "logs")
+        elif system == "Darwin":
+            log_dir = os.path.expanduser("~/Library/Logs/Claude")
+        else:
+            log_dir = os.path.expanduser("~/.config/Claude/logs")
+
+        log_src = os.path.join(log_dir, "mcp-server-kicad.log")
+        if not os.path.exists(log_src):
+            logger.warning(f"[DEV] MCP log not found at: {log_src}")
+            return
+
+        # Project dir = parent of outputDir (the Gerber subfolder)
+        project_dir = os.path.dirname(output_dir)
+
+        # Extract only lines from the current session start (find last "Initializing server")
+        with open(log_src, "r", encoding="utf-8", errors="replace") as f:
+            all_lines = f.readlines()
+
+        # Find last occurrence of server start so we get only the current run
+        session_start = 0
+        for i, line in enumerate(all_lines):
+            if "Initializing server" in line:
+                session_start = i
+
+        session_lines = all_lines[session_start:]
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        from pathlib import Path
+        logs_dir = Path(project_dir) / "logs"
+        logs_dir.mkdir(exist_ok=True)
+        dest = str(logs_dir / f"mcp_log_{timestamp}.txt")
+        with open(dest, "w", encoding="utf-8") as f:
+            f.writelines(session_lines)
+
+        logger.info(f"[DEV] MCP session log saved to: {dest} ({len(session_lines)} lines)")
