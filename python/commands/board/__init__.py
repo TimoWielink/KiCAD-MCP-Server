@@ -2,17 +2,20 @@
 Board-related command implementations for KiCAD interface
 """
 
-import pcbnew
 import logging
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
+
+import pcbnew
+
+from .layers import BoardLayerCommands
+from .outline import BoardOutlineCommands
 
 # Import specialized modules
 from .size import BoardSizeCommands
-from .layers import BoardLayerCommands
-from .outline import BoardOutlineCommands
 from .view import BoardViewCommands
 
-logger = logging.getLogger('kicad_interface')
+logger = logging.getLogger("kicad_interface")
+
 
 class BoardCommands:
     """Handles board-related KiCAD operations"""
@@ -42,7 +45,6 @@ class BoardCommands:
         self.outline_commands.board = value
         self.view_commands.board = value
         logger.debug(f"BoardCommands: board reference updated and propagated to all sub-commands. board is None: {value is None}")
-
     # Delegate board size commands
     def set_board_size(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Set the size of the PCB board"""
@@ -86,4 +88,5 @@ class BoardCommands:
 
     def get_board_extents(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Get the bounding box extents of the board"""
+        self.view_commands.board = self.board
         return self.view_commands.get_board_extents(params)

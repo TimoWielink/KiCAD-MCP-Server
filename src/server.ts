@@ -25,6 +25,7 @@ import { registerDatasheetTools } from "./tools/datasheet.js";
 import { registerFootprintTools } from "./tools/footprint.js";
 import { registerSymbolCreatorTools } from "./tools/symbol-creator.js";
 import { registerUITools } from "./tools/ui.js";
+import { registerFreeroutingTools } from "./tools/freerouting.js";
 import { registerRouterTools } from "./tools/router.js";
 
 // Import resource registration functions
@@ -53,18 +54,8 @@ function findPythonExecutable(scriptPath: string): string {
 
   // Check for virtual environment
   const venvPaths = [
-    join(
-      projectRoot,
-      "venv",
-      isWindows ? "Scripts" : "bin",
-      isWindows ? "python.exe" : "python",
-    ),
-    join(
-      projectRoot,
-      ".venv",
-      isWindows ? "Scripts" : "bin",
-      isWindows ? "python.exe" : "python",
-    ),
+    join(projectRoot, "venv", isWindows ? "Scripts" : "bin", isWindows ? "python.exe" : "python"),
+    join(projectRoot, ".venv", isWindows ? "Scripts" : "bin", isWindows ? "python.exe" : "python"),
   ];
 
   for (const venvPath of venvPaths) {
@@ -76,9 +67,7 @@ function findPythonExecutable(scriptPath: string): string {
 
   // Allow override via KICAD_PYTHON environment variable (any platform)
   if (process.env.KICAD_PYTHON) {
-    logger.info(
-      `Using KICAD_PYTHON environment variable: ${process.env.KICAD_PYTHON}`,
-    );
+    logger.info(`Using KICAD_PYTHON environment variable: ${process.env.KICAD_PYTHON}`);
     return process.env.KICAD_PYTHON;
   }
 
@@ -132,9 +121,7 @@ function findPythonExecutable(scriptPath: string): string {
 
     for (const path of homebrewPaths) {
       if (existsSync(path)) {
-        logger.info(
-          `Found Homebrew Python at: ${path} (ensure pcbnew is importable)`,
-        );
+        logger.info(`Found Homebrew Python at: ${path} (ensure pcbnew is importable)`);
         return path;
       }
     }
@@ -205,19 +192,14 @@ export class KiCADMcpServer {
    * @param kicadScriptPath Path to the Python KiCAD interface script
    * @param logLevel Log level for the server
    */
-  constructor(
-    kicadScriptPath: string,
-    logLevel: "error" | "warn" | "info" | "debug" = "info",
-  ) {
+  constructor(kicadScriptPath: string, logLevel: "error" | "warn" | "info" | "debug" = "info") {
     // Set up the logger
     logger.setLogLevel(logLevel);
 
     // Check if KiCAD script exists
     this.kicadScriptPath = kicadScriptPath;
     if (!existsSync(this.kicadScriptPath)) {
-      throw new Error(
-        `KiCAD interface script not found: ${this.kicadScriptPath}`,
-      );
+      throw new Error(`KiCAD interface script not found: ${this.kicadScriptPath}`);
     }
 
     // Initialize the MCP server
@@ -261,6 +243,7 @@ export class KiCADMcpServer {
     registerFootprintTools(this.server, this.callKicadScript.bind(this));
     registerSymbolCreatorTools(this.server, this.callKicadScript.bind(this));
     registerUITools(this.server, this.callKicadScript.bind(this));
+    registerFreeroutingTools(this.server, this.callKicadScript.bind(this));
 
     // Register all resources
     registerProjectResources(this.server, this.callKicadScript.bind(this));
@@ -275,9 +258,7 @@ export class KiCADMcpServer {
     registerFootprintPrompts(this.server);
 
     logger.info("All KiCAD tools, resources, and prompts registered");
-    logger.info(
-      "Router pattern enabled: 4 router tools + direct tools for discovery",
-    );
+    logger.info("Router pattern enabled: 4 router tools + direct tools for discovery");
   }
 
   /**
@@ -285,15 +266,12 @@ export class KiCADMcpServer {
    */
   private async validatePrerequisites(pythonExe: string): Promise<boolean> {
     const isWindows = process.platform === "win32";
-    const isLinux =
-      process.platform !== "win32" && process.platform !== "darwin";
+    const isLinux = process.platform !== "win32" && process.platform !== "darwin";
     const errors: string[] = [];
 
     // Check if Python executable exists (for absolute paths) or is executable (for commands)
     const isAbsolutePath =
-      pythonExe.startsWith("/") ||
-      pythonExe.startsWith("C:") ||
-      pythonExe.startsWith("\\");
+      pythonExe.startsWith("/") || pythonExe.startsWith("C:") || pythonExe.startsWith("\\");
 
     if (isAbsolutePath) {
       // Absolute path: use existsSync
@@ -301,16 +279,10 @@ export class KiCADMcpServer {
         errors.push(`Python executable not found: ${pythonExe}`);
 
         if (isWindows) {
-          errors.push(
-            "Windows: Install KiCAD 9.0+ from https://www.kicad.org/download/windows/",
-          );
-          errors.push(
-            "Or run: .\\setup-windows.ps1 for automatic configuration",
-          );
+          errors.push("Windows: Install KiCAD 9.0+ from https://www.kicad.org/download/windows/");
+          errors.push("Or run: .\\setup-windows.ps1 for automatic configuration");
         } else if (isLinux) {
-          errors.push(
-            "Linux: Install KiCAD 9.0+ or set KICAD_PYTHON environment variable",
-          );
+          errors.push("Linux: Install KiCAD 9.0+ or set KICAD_PYTHON environment variable");
           errors.push("Set KICAD_PYTHON to specify a custom Python path");
         }
       }
@@ -342,20 +314,14 @@ export class KiCADMcpServer {
       } catch (error: any) {
         errors.push(`Python executable not found in PATH: ${pythonExe}`);
         errors.push(`Error: ${error.message}`);
-        errors.push(
-          "Set KICAD_PYTHON environment variable to specify full path",
-        );
+        errors.push("Set KICAD_PYTHON environment variable to specify full path");
 
         if (isLinux) {
           errors.push("");
           errors.push("Linux troubleshooting:");
           errors.push("1. Check if python3 is installed: which python3");
-          errors.push(
-            "2. Install KiCAD: sudo apt install kicad (Ubuntu/Debian)",
-          );
-          errors.push(
-            "3. Set KICAD_PYTHON=/usr/bin/python3 in your MCP config",
-          );
+          errors.push("2. Install KiCAD: sudo apt install kicad (Ubuntu/Debian)");
+          errors.push("3. Set KICAD_PYTHON=/usr/bin/python3 in your MCP config");
         }
       }
     }
@@ -366,11 +332,7 @@ export class KiCADMcpServer {
     }
 
     // Check if dist/index.js exists (if running from compiled code)
-    const distPath = join(
-      dirname(dirname(this.kicadScriptPath)),
-      "dist",
-      "index.js",
-    );
+    const distPath = join(dirname(dirname(this.kicadScriptPath)), "dist", "index.js");
     if (!existsSync(distPath)) {
       errors.push("Project not built. Run: npm run build");
     }
@@ -466,9 +428,7 @@ export class KiCADMcpServer {
       logger.info("Starting KiCAD MCP server...");
 
       // Start the Python process for KiCAD scripting
-      logger.info(
-        `Starting Python process with script: ${this.kicadScriptPath}`,
-      );
+      logger.info(`Starting Python process with script: ${this.kicadScriptPath}`);
       const pythonExe = findPythonExecutable(this.kicadScriptPath);
 
       logger.info(`Using Python executable: ${pythonExe}`);
@@ -476,9 +436,7 @@ export class KiCADMcpServer {
       // Validate prerequisites
       const isValid = await this.validatePrerequisites(pythonExe);
       if (!isValid) {
-        throw new Error(
-          "Prerequisites validation failed. See logs above for details.",
-        );
+        throw new Error("Prerequisites validation failed. See logs above for details.");
       }
       // Build platform-specific environment for Python process
       const spawnEnv: Record<string, string | undefined> = { ...process.env };
@@ -543,9 +501,7 @@ export class KiCADMcpServer {
 
       // Listen for process exit
       this.pythonProcess.on("exit", (code, signal) => {
-        logger.warn(
-          `Python process exited with code ${code} and signal ${signal}`,
-        );
+        logger.warn(`Python process exited with code ${code} and signal ${signal}`);
         this.pythonProcess = null;
       });
 
@@ -622,12 +578,22 @@ export class KiCADMcpServer {
       // Determine timeout based on command type
       // DRC and export operations need longer timeouts for large boards
       let commandTimeout = 30000; // Default 30 seconds
-      const longRunningCommands = ['run_drc', 'export_gerber', 'export_pdf', 'export_3d', 'save_project', 'refill_zones', 'delete_all_traces'];
+      const longRunningCommands = [
+        'run_drc',
+        'export_gerber',
+        'export_pdf',
+        'export_3d',
+        'save_project',
+        'refill_zones',
+        'delete_all_traces',
+        'sync_schematic_to_board',
+        'list_schematic_nets',
+        'list_schematic_labels',
+        'get_schematic_view',
+      ];
       if (longRunningCommands.includes(command)) {
         commandTimeout = 600000; // 10 minutes for long operations
-        logger.info(
-          `Using extended timeout (${commandTimeout / 1000}s) for command: ${command}`,
-        );
+        logger.info(`Using extended timeout (${commandTimeout / 1000}s) for command: ${command}`);
       }
 
       // Add request to queue with timeout info
@@ -658,7 +624,21 @@ export class KiCADMcpServer {
   }
 
   /**
-   * Try to parse a complete JSON response from the buffer
+   * Try to parse a complete JSON response from the buffer.
+   *
+   * Responses from the Python side are single-line JSON terminated by '\n'
+   * (written via _write_response).  The buffer may also contain non-JSON
+   * preamble lines (e.g. C-level warnings from pcbnew that leaked to the
+   * response fd before the redirect took effect).
+   *
+   * Strategy:
+   *  1. Fast path: JSON.parse(buffer) — works for clean, complete responses
+   *     (JSON.parse tolerates trailing whitespace/newlines).
+   *  2. If that fails and the buffer has no '\n' yet, the response line is
+   *     still arriving in chunks — keep collecting.
+   *  3. If the buffer has '\n', split into lines and search from the END for
+   *     a parseable JSON line.  This avoids prematurely resolving with a
+   *     truncated JSON object when a large response is still chunking in.
    */
   private tryParseResponse(): void {
     if (!this.currentRequestHandler) {
@@ -672,37 +652,83 @@ export class KiCADMcpServer {
       return;
     }
 
+    let result: any;
+
+    // Fast path: try to parse the response as JSON.  Handles the common
+    // case of a clean, complete JSON response (possibly with trailing \n).
     try {
-      // Try to parse the response as JSON
-      const result = JSON.parse(this.responseBuffer);
-
-      // If we get here, we have a valid JSON response
-      logger.debug(
-        `Completed KiCAD command with result: ${result.success ? "success" : "failure"}`,
-      );
-
-      // Clear the timeout since we got a response
-      if (this.currentRequestHandler.timeoutHandle) {
-        clearTimeout(this.currentRequestHandler.timeoutHandle);
+      result = JSON.parse(this.responseBuffer);
+    } catch {
+      // Direct parse failed.  Either the response is still arriving in
+      // chunks, or the buffer has non-JSON preamble from pcbnew.
+      //
+      // The Python side writes each response as a single line of JSON
+      // terminated by \n.  We use the newline as the completion signal:
+      // if there is no \n in the buffer yet, the JSON line is still
+      // being assembled from chunks — keep collecting.
+      if (!this.responseBuffer.includes("\n")) {
+        return;
       }
 
-      // Get the handler before clearing
-      const handler = this.currentRequestHandler;
+      // Buffer contains newline(s).  Split into lines and look for a
+      // complete JSON object, searching from the END so that preamble
+      // lines (which may themselves contain '{') are skipped.
+      const lines = this.responseBuffer.split("\n");
+      let jsonLineIndex = -1;
 
-      // Clear state
-      this.responseBuffer = "";
-      this.currentRequestHandler = null;
-      this.processingRequest = false;
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i].trim();
+        if (line.length === 0) continue;
+        if (!line.startsWith("{")) continue;
 
-      // Resolve the promise with the result
-      handler.resolve(result);
+        try {
+          result = JSON.parse(line);
+          jsonLineIndex = i;
+          break;
+        } catch {
+          // Looks like JSON but doesn't parse — could be an incomplete
+          // final line still being chunked.  Keep collecting.
+          continue;
+        }
+      }
 
-      // Process next request if any
-      setTimeout(() => this.processNextRequest(), 0);
-    } catch (e) {
-      // Not a complete JSON yet, keep collecting data
-      // This is normal for large responses that come in chunks
+      if (jsonLineIndex < 0) {
+        // No parseable JSON line found yet.  Either only preamble has
+        // arrived, or the JSON line is split across the last \n boundary
+        // and is still incomplete.  Keep collecting.
+        return;
+      }
+
+      // Log any preceding non-JSON lines as preamble
+      const preambleLines = lines.slice(0, jsonLineIndex).filter((l) => l.trim().length > 0);
+      if (preambleLines.length > 0) {
+        logger.warn(
+          `Stripped non-JSON preamble from Python response: ${preambleLines.join(" | ")}`,
+        );
+      }
     }
+
+    // If we get here, we have a valid JSON response
+    logger.debug(`Completed KiCAD command with result: ${result.success ? "success" : "failure"}`);
+
+    // Clear the timeout since we got a response
+    if (this.currentRequestHandler.timeoutHandle) {
+      clearTimeout(this.currentRequestHandler.timeoutHandle);
+    }
+
+    // Get the handler before clearing
+    const handler = this.currentRequestHandler;
+
+    // Clear state
+    this.responseBuffer = "";
+    this.currentRequestHandler = null;
+    this.processingRequest = false;
+
+    // Resolve the promise with the result
+    handler.resolve(result);
+
+    // Process next request if any
+    setTimeout(() => this.processNextRequest(), 0);
   }
 
   /**
@@ -732,12 +758,8 @@ export class KiCADMcpServer {
       // Set a timeout (use command-specific timeout or default)
       const timeoutDuration = request.timeout || 30000;
       const timeoutHandle = setTimeout(() => {
-        logger.error(
-          `Command timeout after ${timeoutDuration / 1000}s: ${request.command}`,
-        );
-        logger.error(
-          `Buffer contents: ${this.responseBuffer.substring(0, 200)}...`,
-        );
+        logger.error(`Command timeout after ${timeoutDuration / 1000}s: ${request.command}`);
+        logger.error(`Buffer contents: ${this.responseBuffer.substring(0, 200)}...`);
 
         // Clear state
         this.responseBuffer = "";
@@ -745,11 +767,7 @@ export class KiCADMcpServer {
         this.processingRequest = false;
 
         // Reject the promise
-        reject(
-          new Error(
-            `Command timeout after ${timeoutDuration / 1000}s: ${request.command}`,
-          ),
-        );
+        reject(new Error(`Command timeout after ${timeoutDuration / 1000}s: ${request.command}`));
 
         // Process next request
         setTimeout(() => this.processNextRequest(), 0);

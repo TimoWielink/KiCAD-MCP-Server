@@ -39,6 +39,7 @@ dmypy.json
 
 # Virtual Environments
 venv/
+.venv/
 env/
 ENV/
 
@@ -85,6 +86,9 @@ data/
 # OS
 Thumbs.db
 Desktop.ini
+
+# Generated local config files (contain machine-specific paths)
+windows-mcp-config.json
 
 # Personal notes / local contributions (not for upstream)
 myContribution/
